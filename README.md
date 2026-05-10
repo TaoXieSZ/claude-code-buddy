@@ -1,23 +1,35 @@
-# claude-desktop-buddy (Plus2 + BugC2 fork)
+# claude-code-buddy
 
-Fork of [`anthropics/claude-desktop-buddy`](https://github.com/anthropics/claude-desktop-buddy)
-extended for **M5StickC PLUS2 + BugC2 chassis**, with the Claude crab
-("clawd") as the default mascot.
+A physical Claude companion for your desk. Walks, chirps, blinks, and
+reacts in real time to your **Claude Code** sessions and **Claude
+Desktop** sessions over BLE.
 
-What this fork adds on top of upstream:
+Hardware: M5StickC PLUS2 (1.14" colour LCD, 240MHz ESP32, IMU, buzzer)
+on a BugC2 chassis (4 DC motors, 2 RGB LEDs). Software: this firmware +
+a tiny daemon that bridges Claude Code hooks to the same wire protocol
+the Anthropic desktop apps already speak.
 
-| | Upstream | This fork |
-|---|---|---|
-| Stick variant | M5StickC / Plus | **+ Plus2** (via M5Unified migration; AXP192 deadlock fixed) |
-| Default species | capybara (ASCII) | **crab** (Claude mascot, ASCII) |
-| GIF pet | bufo example | **clawd pack** built from [`rullerzhou-afk/clawd-on-desk`](https://github.com/rullerzhou-afk/clawd-on-desk) — 8 states |
-| Pet base | — | **BugC2 chassis** integration: 4 DC motors via I2C (0x38) drive on persona-state, 2× RGB LEDs as mood lighting |
-| Tooling | `flash_character.py` | + **`tools/motor-calib.html`** — Web Bluetooth motor pattern calibrator (sliders + WASD + 16 sign-combo presets) |
-| GIF pipeline | global bbox (over-padded small poses) | **per-state bbox** (each pose fills its canvas); TARGET_W 96 → 120 |
+What you get:
 
-> The original Anthropic protocol docs in **[REFERENCE.md](REFERENCE.md)**
-> still apply unchanged — this fork is a hardware extension, not a protocol
-> change. Stick still talks plain Nordic UART to Claude desktop.
+- **Clawd** the Claude crab as your default mascot (8-bit pixel art,
+  7 animated moods)
+- **Reacts to Claude session state**: sleeps when idle, paces and chirps
+  when thinking, blinks amber when a permission prompt is waiting,
+  celebrates when you level up
+- **Buddy mode for Claude Code (CLI)** via a launchd daemon that turns
+  hook events into the same heartbeat schema Claude Desktop emits — no
+  firmware changes, just a new producer
+- **Web Bluetooth motor calibrator** for the BugC2 chassis (sliders,
+  WASD, 16 sign-combo presets)
+- 18 fallback ASCII pets if you don't want the GIF runtime
+
+Forked from
+[`anthropics/claude-desktop-buddy`](https://github.com/anthropics/claude-desktop-buddy)
+— heavy thanks to upstream for the wire protocol, BLE bridge, GIF
+runtime, and the entire seven-state persona engine. This project layers
+Plus2 board support, BugC2 chassis driver, the clawd GIF pack, and the
+Claude Code bridge on top. Wire protocol unchanged; see
+[`REFERENCE.md`](REFERENCE.md).
 
 <p align="center">
   <img src="docs/device-plus2-bugc2.jpg" alt="M5StickC Plus2 mounted on a BugC2 chassis, screen showing the clawd buddy with mood/fed/energy stats" width="500">
