@@ -222,6 +222,13 @@ mac-helper/      — Swift package: clipboard sync helper
 .omc/            — OMC tooling state (gitignored)
 ```
 
+## Setting up another stick
+
+Got a second M5StickC? See **[docs/onboarding-next-stick.md](docs/onboarding-next-stick.md)** —
+flash gotchas (USB cable, GATT cache, heap watch), per-stick port
+disambiguation, and a sketch for running two sticks against
+Claude Code + Cursor in parallel.
+
 ## TODO
 
 Roadmap for this fork (PRs welcome):
