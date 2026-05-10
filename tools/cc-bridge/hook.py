@@ -23,8 +23,11 @@ TIMEOUT_S = 0.5  # don't slow Claude Code down for any reason
 
 
 def main():
+    # Read until EOF — read(N) sometimes returns early when Claude Code
+    # writes incrementally before closing stdin, producing truncated JSON
+    # the daemon then rejects.
     try:
-        raw = sys.stdin.buffer.read(64 * 1024)
+        raw = sys.stdin.buffer.read()
     except Exception:
         return 0
     if not raw:

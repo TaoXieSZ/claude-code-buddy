@@ -121,20 +121,46 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
     sid = ev.get("session_id") or ev.get("sessionId") or "anon"
     changed = False
 
+    # Semantics matter — Claude Code's `Stop` is "assistant turn ended", NOT
+    # "session terminated". Don't decrement `total` there. And don't set
+    # `completed`; that's reserved for level-ups in the upstream protocol
+    # and would otherwise fire CELEBRATE on every turn end.
     if name == "SessionStart":
         if sid not in state._sessions:
-            state._sessions[sid] = {"running": True}
+            state._sessions[sid] = {"running": False}
             state.total += 1
-            state.running += 1
             changed = True
         state.add_entry("session start")
 
-    elif name in ("Stop", "SessionEnd"):
-        s = state._sessions.pop(sid, None)
+    elif name == "SessionEnd":
+        if state._sessions.pop(sid, None):
+            state.total = max(0, state.total - 1)
+            state.add_entry("session ended")
+            changed = True
+
+    elif name == "UserPromptSubmit":
+        # User just submitted → model about to think.
+        if sid in state._sessions and not state._sessions[sid].get("running"):
+            state._sessions[sid]["running"] = True
+            state.running += 1
+        # Even if we never saw a SessionStart, treat this as one.
+        elif sid not in state._sessions:
+            state._sessions[sid] = {"running": True}
+            state.total += 1
+            state.running += 1
+        prompt = ev.get("prompt") or ev.get("user_prompt") or ""
+        if prompt:
+            state.add_entry(f"you: {prompt}")
+        state.msg = "thinking…"
+        changed = True
+
+    elif name == "Stop":
+        # Assistant done responding (this turn). Session still open.
+        s = state._sessions.get(sid)
         if s and s.get("running"):
+            s["running"] = False
             state.running = max(0, state.running - 1)
-            state.completed = True
-            state.add_entry("session done")
+            state.msg = "ready"
             changed = True
 
     elif name == "PreToolUse":
@@ -172,13 +198,6 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
                 state.msg = msg[:120]
                 state.add_entry(msg)
                 changed = True
-
-    elif name == "UserPromptSubmit":
-        prompt = ev.get("prompt") or ev.get("user_prompt") or ""
-        if prompt:
-            state.add_entry(f"you: {prompt}")
-            state.msg = "thinking…"
-            changed = True
 
     elif name == "PostCompact":
         state.add_entry("compacted")
