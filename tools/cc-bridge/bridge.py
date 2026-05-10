@@ -208,10 +208,27 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
 
 # ─── BLE writer ────────────────────────────────────────────────────────
 class BleWriter:
-    def __init__(self):
+    def __init__(self, on_tx_line=None):
         self.client: BleakClient | None = None
         self.address: str | None = None
         self._lock = asyncio.Lock()
+        self._on_tx_line = on_tx_line  # called per inbound NUS TX line
+        self._tx_buf = bytearray()
+
+    def _tx_handler(self, _char, data: bytearray):
+        # NUS TX is line-oriented JSON. Buffer until \n, then parse.
+        self._tx_buf.extend(data)
+        while b"\n" in self._tx_buf:
+            line, _, rest = bytes(self._tx_buf).partition(b"\n")
+            self._tx_buf = bytearray(rest)
+            line = line.strip()
+            if not line:
+                continue
+            if self._on_tx_line:
+                try:
+                    self._on_tx_line(line.decode("utf-8", errors="replace"))
+                except Exception as e:
+                    log.warning("tx handler: %s", e)
 
     async def ensure_connected(self) -> bool:
         if self.client and self.client.is_connected:
@@ -239,6 +256,12 @@ class BleWriter:
             log.warning("connect failed: %s", e)
             self.client = None
             return False
+        # Subscribe to TX so we can receive permission acks the stick sends
+        # when the user presses A (decision=once) or B (decision=deny).
+        try:
+            await self.client.start_notify(NUS_TX, self._tx_handler)
+        except BleakError as e:
+            log.warning("start_notify failed (permission echo disabled): %s", e)
         log.info("connected")
         return True
 
@@ -267,13 +290,47 @@ class BleWriter:
                 self.client = None
 
 
+# ─── permission echo plumbing ──────────────────────────────────────────
+# Pending permission requests: rid -> Future awaiting stick decision.
+PENDING: dict[str, asyncio.Future] = {}
+
+
+def on_stick_line(line: str):
+    """Called from the BLE TX handler thread (sync). Resolve any pending
+    permission future when the stick sends back an ack."""
+    try:
+        obj = json.loads(line)
+    except Exception:
+        return
+    if obj.get("cmd") != "permission":
+        return
+    rid = obj.get("id")
+    decision = obj.get("decision", "ask")
+    fut = PENDING.get(rid)
+    if fut and not fut.done():
+        fut.get_loop().call_soon_threadsafe(fut.set_result, decision)
+
+
 # ─── socket server + main loop ─────────────────────────────────────────
 async def handle_client(reader, writer, state, ble, dirty):
-    addr = writer.get_extra_info("peername") or "<peer>"
     try:
         data = await reader.read(64 * 1024)
         if not data:
             return
+
+        # First decide if this is a request/response (wait_permission) or a
+        # batch of fire-and-forget hook events.
+        first_line = data.splitlines()[0].strip() if data else b""
+        try:
+            head = json.loads(first_line) if first_line else {}
+        except json.JSONDecodeError:
+            head = {}
+
+        if isinstance(head, dict) and head.get("action") == "wait_permission":
+            await _handle_wait_permission(head, writer, state, dirty)
+            return
+
+        # Otherwise: treat each line as a hook event.
         for line in data.splitlines():
             line = line.strip()
             if not line:
@@ -293,6 +350,44 @@ async def handle_client(reader, writer, state, ble, dirty):
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+async def _handle_wait_permission(req, writer, state, dirty):
+    rid = req.get("id") or f"req_{int(time.time() * 1000)}"
+    tool = req.get("tool", "tool")
+    hint = (req.get("hint") or "")[:120]
+    timeout = float(req.get("timeout", 6.0))
+
+    log.info("wait_permission id=%s tool=%s timeout=%.1fs", rid, tool, timeout)
+
+    # Surface the prompt to the stick by setting state.prompt and
+    # signalling dirty — the heartbeat loop will push it next tick.
+    state.waiting = max(state.waiting, 1)
+    state.prompt = {"id": rid, "tool": tool, "hint": hint}
+    state.msg = f"approve: {tool}"
+    dirty.set()
+
+    fut = asyncio.get_running_loop().create_future()
+    PENDING[rid] = fut
+    try:
+        decision = await asyncio.wait_for(fut, timeout=timeout)
+        log.info("permission %s → %s", rid, decision)
+    except asyncio.TimeoutError:
+        decision = "ask"
+        log.info("permission %s timed out → ask", rid)
+    finally:
+        PENDING.pop(rid, None)
+        # Clear waiting state.
+        state.waiting = 0
+        state.prompt = None
+        state.msg = ""
+        dirty.set()
+
+    try:
+        writer.write((json.dumps({"decision": decision}) + "\n").encode())
+        await writer.drain()
+    except Exception as e:
+        log.warning("reply failed: %s", e)
 
 
 async def heartbeat_loop(state, ble, dirty):
@@ -330,7 +425,7 @@ async def main():
         pass
 
     state = BuddyState()
-    ble = BleWriter()
+    ble = BleWriter(on_tx_line=on_stick_line)
     dirty = asyncio.Event()
 
     server = await asyncio.start_unix_server(

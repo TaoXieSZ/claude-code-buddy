@@ -29,17 +29,21 @@ PLIST_LABEL="com.cc-bridge"
 PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 SETTINGS="${HOME}/.claude/settings.json"
 
-# Hook events we care about. PreToolUse/PostToolUse without a matcher
-# fires for all tools.
-HOOK_EVENTS=(
+# Fire-and-forget events → hook.py (async, non-blocking).
+HOOK_EVENTS_ASYNC=(
   SessionStart
   Stop
   SessionEnd
-  PreToolUse
   PostToolUse
   PermissionRequest
   Notification
   UserPromptSubmit
+)
+# Synchronous events → hook_permission.py. PreToolUse waits up to a few
+# seconds for the user to press A on the stick, then returns a Claude
+# Code permissionDecision (allow/deny/ask) so the buddy can gate tools.
+HOOK_EVENTS_SYNC=(
+  PreToolUse
 )
 
 uninstall() {
@@ -49,18 +53,19 @@ uninstall() {
   rm -f "${SOCKET_PATH}"
 
   if [[ -f "${SETTINGS}" ]]; then
-    local hook_cmd_path="${HERE}/hook.py"
     echo "→ removing hook entries from ${SETTINGS}"
-    tmp="$(mktemp)"
-    jq --arg path "${hook_cmd_path}" '
-      .hooks //= {}
-      | .hooks |= with_entries(
-          .value |= map(
-            .hooks |= map(select((.command // "") | contains($path) | not))
+    for hook_path in "${HERE}/hook.py" "${HERE}/hook_permission.py"; do
+      tmp="$(mktemp)"
+      jq --arg path "${hook_path}" '
+        .hooks //= {}
+        | .hooks |= with_entries(
+            .value |= map(
+              .hooks |= map(select((.command // "") | contains($path) | not))
+            )
+            | .value |= map(select(.hooks | length > 0))
           )
-          | .value |= map(select(.hooks | length > 0))
-        )
-    ' "${SETTINGS}" > "${tmp}" && mv "${tmp}" "${SETTINGS}"
+      ' "${SETTINGS}" > "${tmp}" && mv "${tmp}" "${SETTINGS}"
+    done
   fi
   echo "✓ uninstalled. venv at ${VENV} left in place — rm -rf manually if you want."
 }
@@ -91,7 +96,13 @@ sed \
 
 echo "→ (re)loading launchd agent"
 launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "${PLIST_DST}"
+sleep 1   # macOS sometimes needs a beat for the prior agent to fully release.
+if ! launchctl bootstrap "gui/$(id -u)" "${PLIST_DST}"; then
+  echo "  ! bootstrap failed (already loaded or transient I/O). Trying kickstart."
+  launchctl kickstart -k "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null || \
+    echo "  ! kickstart failed too — bring it up manually:" \
+         "launchctl bootstrap gui/\$(id -u) ${PLIST_DST}"
+fi
 
 # ─── 3. patch ~/.claude/settings.json ──────────────────────────────────
 if ! command -v jq >/dev/null 2>&1; then
@@ -101,28 +112,61 @@ fi
 mkdir -p "$(dirname "${SETTINGS}")"
 [[ -f "${SETTINGS}" ]] || echo '{}' > "${SETTINGS}"
 
-HOOK_CMD="${VENV}/bin/python3 ${HERE}/hook.py"
+HOOK_CMD_ASYNC="${VENV}/bin/python3 ${HERE}/hook.py"
+HOOK_CMD_SYNC="${VENV}/bin/python3 ${HERE}/hook_permission.py"
 
-for ev in "${HOOK_EVENTS[@]}"; do
+# Idempotent install: first STRIP any prior cc-bridge hook entries (under
+# either hook.py or hook_permission.py) so we re-converge to whatever the
+# script wires below — even if the slots changed between runs.
+echo "→ stripping any prior cc-bridge hook entries"
+for hook_path in "${HERE}/hook.py" "${HERE}/hook_permission.py"; do
   tmp="$(mktemp)"
-  jq --arg ev "${ev}" --arg cmd "${HOOK_CMD}" '
+  jq --arg path "${hook_path}" '
+    .hooks //= {}
+    | .hooks |= with_entries(
+        .value |= map(
+          .hooks |= map(select((.command // "") | contains($path) | not))
+        )
+        | .value |= map(select(.hooks | length > 0))
+      )
+  ' "${SETTINGS}" > "${tmp}" && mv "${tmp}" "${SETTINGS}"
+done
+
+# Sync hook gets a longer timeout because it waits for stick approval.
+# Async hooks need to return fast (just forwards to a Unix socket).
+add_hook() {
+  local ev="$1" cmd="$2" timeout_ms="$3" is_async="$4"
+  local tmp
+  tmp="$(mktemp)"
+  jq --arg ev "${ev}" \
+     --arg cmd "${cmd}" \
+     --argjson timeout "${timeout_ms}" \
+     --argjson is_async "${is_async}" '
     .hooks //= {}
     | .hooks[$ev] //= []
-    # Only add if no existing entry references this exact command path.
     | if (.hooks[$ev] | map(.hooks // []) | flatten | map(.command // "") | any(. == $cmd))
       then .
       else .hooks[$ev] += [{
         "hooks": [{
           "type": "command",
           "command": $cmd,
-          "timeout": 1000,
-          "async": true
+          "timeout": $timeout,
+          "async": $is_async
         }]
       }]
       end
   ' "${SETTINGS}" > "${tmp}" && mv "${tmp}" "${SETTINGS}"
+}
+
+for ev in "${HOOK_EVENTS_ASYNC[@]}"; do
+  add_hook "${ev}" "${HOOK_CMD_ASYNC}" 1000 true
 done
-echo "→ wired hooks for: ${HOOK_EVENTS[*]}"
+for ev in "${HOOK_EVENTS_SYNC[@]}"; do
+  # Match cc-bridge's wait_permission timeout (~6s) plus headroom.
+  add_hook "${ev}" "${HOOK_CMD_SYNC}" 10000 false
+done
+echo "→ wired async hooks: ${HOOK_EVENTS_ASYNC[*]}"
+echo "→ wired sync hooks:  ${HOOK_EVENTS_SYNC[*]}"
 
 # ─── done ──────────────────────────────────────────────────────────────
 cat <<EOF
