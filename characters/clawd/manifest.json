@@ -10,7 +10,11 @@
   "states": {
     "sleep": "sleep.gif",
     "idle": "idle.gif",
-    "busy": "busy.gif",
+    "busy": [
+      "busy_0.gif",
+      "busy_1.gif",
+      "busy_2.gif"
+    ],
     "attention": "attention.gif",
     "celebrate": "celebrate.gif",
     "dizzy": "dizzy.gif",

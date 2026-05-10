@@ -106,8 +106,8 @@ just resize and remap it onto the buddy's persona-state engine here.
 |---|---|---|
 | `sleep` | `clawd-sleeping.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-sleeping.gif" width="96"> |
 | `idle` | `clawd-idle.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-idle.gif" width="96"> |
-| `busy` | `clawd-thinking.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-thinking.gif" width="96"> |
-| `attention` | `clawd-error.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-error.gif" width="96"> |
+| `busy` | `clawd-thinking` / `typing` / `building` (rotates) | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-thinking.gif" width="80"> <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-typing.gif" width="80"> <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-building.gif" width="80"> |
+| `attention` | `clawd-notification.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-notification.gif" width="96"> |
 | `celebrate` | `clawd-juggling.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-juggling.gif" width="96"> |
 | `dizzy` | `clawd-conducting.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-conducting.gif" width="96"> |
 | `heart` | `clawd-happy.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-happy.gif" width="96"> |
