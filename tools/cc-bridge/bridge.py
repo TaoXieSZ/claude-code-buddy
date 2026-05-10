@@ -211,12 +211,14 @@ class BleWriter:
     def __init__(self, on_tx_line=None):
         self.client: BleakClient | None = None
         self.address: str | None = None
-        self._lock = asyncio.Lock()
-        self._on_tx_line = on_tx_line  # called per inbound NUS TX line
+        self._lock = asyncio.Lock()           # serializes write_gatt_char
+        self._connect_lock = asyncio.Lock()   # serializes ensure_connected
+        self._on_tx_line = on_tx_line
         self._tx_buf = bytearray()
 
     def _tx_handler(self, _char, data: bytearray):
         # NUS TX is line-oriented JSON. Buffer until \n, then parse.
+        log.info("tx raw +%d: %r", len(data), bytes(data)[:120])
         self._tx_buf.extend(data)
         while b"\n" in self._tx_buf:
             line, _, rest = bytes(self._tx_buf).partition(b"\n")
@@ -231,48 +233,64 @@ class BleWriter:
                     log.warning("tx handler: %s", e)
 
     async def ensure_connected(self) -> bool:
-        if self.client and self.client.is_connected:
+        # Lock the entire connect flow — both reconnect_loop and write()
+        # can call this concurrently, which used to spawn duplicate
+        # BleakClient instances and cripple the NUS TX subscription
+        # (the second client's start_notify would silently fight the
+        # first for the same characteristic).
+        async with self._connect_lock:
+            if self.client and self.client.is_connected:
+                return True
+            log.info("scanning for stick (prefix=%s)", DEVICE_PREFIX)
+            device = None
+            try:
+                devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
+            except BleakError as e:
+                log.warning("scan failed: %s", e)
+                return False
+            for d in devices:
+                if d.name and d.name.startswith(DEVICE_PREFIX):
+                    device = d
+                    break
+            if not device:
+                log.warning("no Claude-* device in scan")
+                return False
+            log.info("connecting to %s (%s)", device.name, device.address)
+            self.address = device.address
+            self.client = BleakClient(device)
+            try:
+                await self.client.connect()
+            except BleakError as e:
+                log.warning("connect failed: %s", e)
+                self.client = None
+                return False
+            # Subscribe to TX so we can receive permission acks the stick
+            # sends when user presses A (decision=once) or B (decision=deny).
+            try:
+                await self.client.start_notify(NUS_TX, self._tx_handler)
+                log.info("subscribed to NUS TX")
+            except BleakError as e:
+                log.warning("start_notify failed (permission echo disabled): %s", e)
+            log.info("connected")
             return True
-        log.info("scanning for stick (prefix=%s)", DEVICE_PREFIX)
-        device = None
-        try:
-            devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-        except BleakError as e:
-            log.warning("scan failed: %s", e)
-            return False
-        for d in devices:
-            if d.name and d.name.startswith(DEVICE_PREFIX):
-                device = d
-                break
-        if not device:
-            log.warning("no Claude-* device in scan")
-            return False
-        log.info("connecting to %s (%s)", device.name, device.address)
-        self.address = device.address
-        self.client = BleakClient(device)
-        try:
-            await self.client.connect()
-        except BleakError as e:
-            log.warning("connect failed: %s", e)
-            self.client = None
-            return False
-        # Subscribe to TX so we can receive permission acks the stick sends
-        # when the user presses A (decision=once) or B (decision=deny).
-        try:
-            await self.client.start_notify(NUS_TX, self._tx_handler)
-        except BleakError as e:
-            log.warning("start_notify failed (permission echo disabled): %s", e)
-        log.info("connected")
-        return True
 
     async def write(self, payload: dict):
         async with self._lock:
             if not await self.ensure_connected():
+                log.warning("write skipped: not connected")
                 return
             line = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
             try:
-                await self.client.write_gatt_char(NUS_RX, line, response=False)
-            except BleakError as e:
+                # response=False: write-without-response, matches Claude
+                # Desktop's own use of NUS RX. With response=True the
+                # bleak macOS backend would block waiting for an ack the
+                # stick doesn't send for this characteristic, freezing
+                # heartbeat_loop and starving subsequent emits.
+                await asyncio.wait_for(
+                    self.client.write_gatt_char(NUS_RX, line, response=False),
+                    timeout=5.0,
+                )
+            except (BleakError, asyncio.TimeoutError) as e:
                 log.warning("write failed (%s); dropping client", e)
                 try:
                     await self.client.disconnect()
@@ -295,6 +313,17 @@ class BleWriter:
 PENDING: dict[str, asyncio.Future] = {}
 
 
+def _safe_set(fut: asyncio.Future, value):
+    # macOS BLE sometimes redelivers the same notification, which would
+    # call set_result twice and raise InvalidStateError on the second
+    # call. The exception traceback was previously taking long enough on
+    # the event loop that the awaiting wait_for raced into a timeout
+    # (set_result ran but the awaiter never resumed). Idempotent set
+    # avoids both: no exception, no extra loop work.
+    if not fut.done():
+        fut.set_result(value)
+
+
 def on_stick_line(line: str):
     """Called from the BLE TX handler thread (sync). Resolve any pending
     permission future when the stick sends back an ack."""
@@ -308,7 +337,7 @@ def on_stick_line(line: str):
     decision = obj.get("decision", "ask")
     fut = PENDING.get(rid)
     if fut and not fut.done():
-        fut.get_loop().call_soon_threadsafe(fut.set_result, decision)
+        fut.get_loop().call_soon_threadsafe(_safe_set, fut, decision)
 
 
 # ─── socket server + main loop ─────────────────────────────────────────
@@ -398,7 +427,12 @@ async def heartbeat_loop(state, ble, dirty):
         except asyncio.TimeoutError:
             pass  # keepalive
         dirty.clear()
-        await ble.write(state.to_payload())
+        payload = state.to_payload()
+        log.info("emit: running=%d waiting=%d prompt=%s msg=%s",
+                 payload.get("running", 0), payload.get("waiting", 0),
+                 (payload.get("prompt", {}) or {}).get("id", "-"),
+                 payload.get("msg", "")[:40])
+        await ble.write(payload)
 
 
 async def reconnect_loop(ble):

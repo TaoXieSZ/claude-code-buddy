@@ -226,12 +226,19 @@ mac-helper/      — Swift package: clipboard sync helper
 
 Roadmap for this fork (PRs welcome):
 
-- [ ] **Claude Code CLI bridge** — desktop-side daemon that consumes
-      Claude Code hooks (SessionStart / PreToolUse / Stop / Notification)
-      and pushes the same heartbeat protocol over BLE NUS, so the buddy
-      reacts to terminal sessions the way it does to Claude desktop
-      sessions today. Plan in `.omc/plans/crab-and-cli-bridge.md`.
-      Stick firmware needs zero changes — just a producer.
+- [x] ~~**Claude Code CLI bridge** — desktop-side daemon that consumes
+      Claude Code hooks~~ — shipped in `tools/cc-bridge/`. Includes
+      synchronous PreToolUse hook that surfaces tool-approval prompts
+      to the stick (press A=allow, B=deny). Note: macOS BLE encryption
+      is flaky; the bridge currently disconnects+reconnects every few
+      seconds during back-to-back tool calls, which can eat the user's
+      approval window. Reliability work tracked separately below.
+- [ ] **cc-bridge BLE stability** — bleak+CoreBluetooth on macOS keeps
+      dropping the encrypted NUS link mid-session, so the permission
+      echo (PreToolUse → stick A → allow) misses windows when the
+      reconnect lag exceeds the 10s hook timeout. Either pre-emptive
+      keepalive writes, or switching to an unencrypted "debug" service
+      separate from the encrypted NUS.
 - [ ] **Re-enable audio capture / BLE PTT** on Plus2. Currently disabled
       in `setup()` because the I2S init burns ~68KB heap that the 16-bit
       sprite needs. Need to either drop sprite to 8-bit palette or use
