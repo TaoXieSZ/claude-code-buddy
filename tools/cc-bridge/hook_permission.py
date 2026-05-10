@@ -24,7 +24,7 @@ import sys
 import time
 
 SOCKET_PATH = os.environ.get("CC_BRIDGE_SOCKET", "/tmp/cc-bridge.sock")
-TIMEOUT_S = float(os.environ.get("CC_BRIDGE_PERMISSION_TIMEOUT_S", "3"))
+TIMEOUT_S = float(os.environ.get("CC_BRIDGE_PERMISSION_TIMEOUT_S", "5"))
 SOCKET_DEADLINE_S = TIMEOUT_S + 2.0
 
 # Map stick decisions to Claude Code permissionDecision values.
