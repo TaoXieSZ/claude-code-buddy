@@ -14,6 +14,16 @@
 #define NUS_RX_UUID      "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_TX_UUID      "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 
+// Debug service for cc-bridge (Claude Code daemon) — same line-JSON
+// protocol but UNENCRYPTED. The encrypted NUS link kept dropping under
+// macOS bleak when held open for sustained writes (CoreBluetooth +
+// ESP32 secure pairing don't play well together for our use case),
+// which broke the permission echo's 5s window. The debug service skips
+// pairing entirely; security tradeoff is acceptable for a desk toy.
+#define DBG_SERVICE_UUID "b0c2dbe6-cc01-4000-8000-00805f9b34fb"
+#define DBG_RX_UUID      "b0c2dbe6-cc02-4000-8000-00805f9b34fb"
+#define DBG_TX_UUID      "b0c2dbe6-cc03-4000-8000-00805f9b34fb"
+
 // Incoming bytes are buffered in a simple ring for bleRead()/bleAvailable().
 // Sized to hold a transcript snapshot JSON plus headroom; the GATT layer
 // will flow-control if we fall behind.
@@ -25,6 +35,9 @@ static volatile size_t rxTail = 0;
 static BLEServer*         server = nullptr;
 static BLECharacteristic* txChar = nullptr;
 static BLECharacteristic* rxChar = nullptr;
+// Debug service mirrors txChar/rxChar without encryption.
+static BLECharacteristic* dtxChar = nullptr;
+static BLECharacteristic* drxChar = nullptr;
 static volatile bool      connected = false;
 static volatile bool      secure = false;
 static volatile uint32_t  passkey = 0;
@@ -117,6 +130,25 @@ void bleInit(const char* deviceName) {
 
   svc->start();
 
+  // Debug service — same line-JSON protocol but no encryption. Used by
+  // tools/cc-bridge daemon. Default permissions are open (no _ENCRYPTED
+  // suffix), so bleak on macOS won't trigger pairing/encryption when it
+  // accesses these characteristics.
+  BLEService* dsvc = server->createService(DBG_SERVICE_UUID);
+  dtxChar = dsvc->createCharacteristic(
+    DBG_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  dtxChar->setAccessPermissions(ESP_GATT_PERM_READ);   // open, no MITM
+  // CCCD descriptor for the notify characteristic — bleak's start_notify
+  // writes to this. Open permissions so encryption is never triggered.
+  BLE2902* dcccd = new BLE2902();
+  dcccd->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
+  dtxChar->addDescriptor(dcccd);
+  drxChar = dsvc->createCharacteristic(
+    DBG_RX_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  drxChar->setAccessPermissions(ESP_GATT_PERM_WRITE);  // open, no MITM
+  drxChar->setCallbacks(new RxCallbacks());   // same callback feeds shared rxBuf
+  dsvc->start();
+
   BLESecurity* sec = new BLESecurity();
   sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
   sec->setCapability(ESP_IO_CAP_OUT);
@@ -126,6 +158,7 @@ void bleInit(const char* deviceName) {
 
   BLEAdvertising* adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(NUS_SERVICE_UUID);
+  adv->addServiceUUID(DBG_SERVICE_UUID);
   adv->setScanResponse(true);
   adv->setMinPreferred(0x06);   // iOS-friendly connection interval
   adv->setMaxPreferred(0x12);
@@ -160,7 +193,7 @@ int bleRead() {
 }
 
 size_t bleWrite(const uint8_t* data, size_t len) {
-  if (!connected || !txChar) return 0;
+  if (!connected) return 0;
   // ATT notify payload is limited to (MTU - 3). macOS negotiates 185, so
   // the 182-byte chunk works there; use the live mtu so a peer that caps
   // at the 23-byte default doesn't get truncated notifies.
@@ -170,11 +203,14 @@ size_t bleWrite(const uint8_t* data, size_t len) {
   while (sent < len) {
     size_t n = len - sent;
     if (n > chunk) n = chunk;
-    txChar->setValue((uint8_t*)(data + sent), n);
-    txChar->notify();
+    // Mirror to both encrypted (NUS) and unencrypted (debug) tx
+    // characteristics so whichever central is connected sees the same
+    // line-JSON stream — Claude Desktop subscribes to NUS, cc-bridge
+    // subscribes to the debug tx.
+    if (txChar)  { txChar->setValue((uint8_t*)(data + sent), n);  txChar->notify(); }
+    if (dtxChar) { dtxChar->setValue((uint8_t*)(data + sent), n); dtxChar->notify(); }
     sent += n;
-    // Small yield so the BLE stack flushes before the next chunk.
-    delay(4);
+    delay(4);   // small yield so the BLE stack flushes before the next chunk
   }
   return sent;
 }

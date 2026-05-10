@@ -53,10 +53,15 @@ DEVICE_PREFIX = os.environ.get("CC_BRIDGE_DEVICE_PREFIX", "Claude-")
 LOG_PATH = os.environ.get(
     "CC_BRIDGE_LOG", str(Path.home() / "Library/Logs/cc-bridge.log")
 )
-NUS_SVC = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
-NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
-NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
-KEEPALIVE_SEC = 10.0
+# cc-bridge talks to the firmware's debug service (unencrypted) instead
+# of the encrypted NUS that Claude Desktop uses. Same line-JSON
+# protocol; the firmware mirrors notifies to both characteristics.
+# This avoids the macOS bleak ↔ ESP32 secure-pairing instability that
+# kept dropping the encrypted link mid-session.
+NUS_SVC = "b0c2dbe6-cc01-4000-8000-00805f9b34fb"
+NUS_RX  = "b0c2dbe6-cc02-4000-8000-00805f9b34fb"
+NUS_TX  = "b0c2dbe6-cc03-4000-8000-00805f9b34fb"
+KEEPALIVE_SEC = 2.0  # macOS CoreBluetooth drops idle GATT links fast; pump traffic frequently
 SCAN_TIMEOUT = 8.0
 RECONNECT_BACKOFF_SEC = (2, 4, 8, 16, 30)  # ramps then plateaus
 
