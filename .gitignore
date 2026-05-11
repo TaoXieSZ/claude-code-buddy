@@ -5,3 +5,5 @@ data/
 .omc/
 src/.omc/
 __pycache__/
+.omr/
+.cursor/
