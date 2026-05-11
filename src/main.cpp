@@ -76,6 +76,12 @@ bool     screenOff = false;
 bool     swallowBtnA = false;
 bool     swallowBtnB = false;
 bool     gifAvailable = false;
+// BugC2 chassis presence latched at boot. When attached, its base
+// physically blocks the side button B, so we remap A:
+//   short tap = cycle approve/deny selection
+//   long press = confirm (also doubles as menu-confirm everywhere else)
+bool     bugc2Present  = false;
+uint8_t  promptSelection = 0;  // 0 = approve, 1 = deny (only used when bugc2Present)
 
 // ASCII species removed — clawd GIF is the only pet. Menu still calls this
 // (entry kept for layout); we just re-render the same character.
@@ -761,6 +767,18 @@ static void drawApproval() {
     spr.setTextColor(p.textDim, p.bg);
     spr.setCursor(4, H - 12);
     spr.print("sent...");
+  } else if (bugc2Present) {
+    // No-B mode: highlight the currently selected option; tap A to
+    // toggle, long-press A to commit.
+    bool selApprove = (promptSelection == 0);
+    spr.setCursor(4, H - 12);
+    if (selApprove) {
+      spr.setTextColor(p.bg, GREEN);  spr.print(" approve ");
+      spr.setTextColor(p.textDim, p.bg); spr.print("  deny");
+    } else {
+      spr.setTextColor(p.textDim, p.bg); spr.print("approve  ");
+      spr.setTextColor(p.bg, HOT);    spr.print(" deny ");
+    }
   } else {
     spr.setTextColor(GREEN, p.bg);
     spr.setCursor(4, H - 12);
@@ -1015,8 +1033,8 @@ void setup() {
 
   Serial.printf("buddy: %s\n", gifAvailable ? "GIF character loaded" : "no character");
 
-  if (bugc2_begin()) Serial.println("bugc2: present");
-  else               Serial.println("bugc2: not present");
+  bugc2Present = bugc2_begin();
+  Serial.println(bugc2Present ? "bugc2: present" : "bugc2: not present");
   // (motor diag removed; calibration now done over BLE via the HTML tool —
   // see tools/motor-calib.html and {"cmd":"motor","s":[...]} in data.h)
 }
@@ -1120,6 +1138,7 @@ void loop() {
     responseSent = false;
     if (tama.promptId[0]) {
       promptArrivedMs = millis();
+      promptSelection = 0;   // default highlight = approve
       wake();
       beep(1200, 80);   // alert chirp
       // Jump to the approval screen no matter what was open — drawApproval
@@ -1158,7 +1177,34 @@ void loop() {
   if (M5.BtnA.pressedFor(600) && !btnALong && !swallowBtnA) {
     btnALong = true;
     beep(800, 60);
-    if (resetOpen) { resetOpen = false; }
+    if (bugc2Present && inPrompt) {
+      // No-B mode: long-press commits whatever's selected.
+      const char* dec = (promptSelection == 0) ? "once" : "deny";
+      char cmd[96];
+      snprintf(cmd, sizeof(cmd),
+               "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"%s\"}",
+               tama.promptId, dec);
+      sendCmd(cmd);
+      responseSent = true;
+      if (promptSelection == 0) {
+        uint32_t tookS = (millis() - promptArrivedMs) / 1000;
+        statsOnApproval(tookS);
+        beep(2400, 60);
+        if (tookS < 5) triggerOneShot(P_HEART, 2000);
+      } else {
+        statsOnDenial();
+        beep(600, 60);
+      }
+    } else if (bugc2Present && resetOpen) {
+      beep(2400, 30);
+      applyReset(resetSel);
+    } else if (bugc2Present && settingsOpen) {
+      beep(2400, 30);
+      applySetting(settingsSel);
+    } else if (bugc2Present && menuOpen) {
+      beep(2400, 30);
+      menuConfirm();
+    } else if (resetOpen) { resetOpen = false; }
     else if (settingsOpen) { settingsOpen = false; characterInvalidate(); }
     else {
       menuOpen = !menuOpen;
@@ -1169,7 +1215,11 @@ void loop() {
   }
   if (M5.BtnA.wasReleased()) {
     if (!btnALong && !swallowBtnA) {
-      if (inPrompt) {
+      if (inPrompt && bugc2Present) {
+        // No-B mode: tap cycles selection; commit happens on long-press.
+        promptSelection ^= 1;
+        beep(1800, 30);
+      } else if (inPrompt) {
         char cmd[96];
         snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"once\"}", tama.promptId);
         sendCmd(cmd);
