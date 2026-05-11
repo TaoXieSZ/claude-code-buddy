@@ -58,6 +58,23 @@ LOG_PATH = os.environ.get(
 # protocol; the firmware mirrors notifies to both characteristics.
 # This avoids the macOS bleak ↔ ESP32 secure-pairing instability that
 # kept dropping the encrypted link mid-session.
+# Tools that should never trigger an approve prompt on the stick:
+# pure interactive (AskUserQuestion, *PlanMode) and planning/state-only
+# (TodoWrite, Task*). These don't touch the system, and AskUserQuestion
+# in particular IS the asking mechanism — gating it is a logic loop.
+SAFE_TOOLS = {
+    "AskUserQuestion",
+    "ExitPlanMode",
+    "EnterPlanMode",
+    "TodoWrite",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskList",
+    "TaskGet",
+    "TaskOutput",
+    "TaskStop",
+}
+
 NUS_SVC = "b0c2dbe6-cc01-4000-8000-00805f9b34fb"
 NUS_RX  = "b0c2dbe6-cc02-4000-8000-00805f9b34fb"
 NUS_TX  = "b0c2dbe6-cc03-4000-8000-00805f9b34fb"
@@ -187,15 +204,21 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         # Permission ask blocks the session — surface it.
         if name == "PermissionRequest" or "permission" in (ev.get("message") or "").lower():
             tool = ev.get("tool_name") or ev.get("tool") or "tool"
-            pid = ev.get("request_id") or ev.get("id") or f"req_{int(time.time())}"
-            state.waiting = max(state.waiting, 1)
-            state.prompt = {
-                "id": pid,
-                "tool": tool,
-                "hint": (ev.get("message") or ev.get("hint") or "")[:120],
-            }
-            state.msg = f"approve: {tool}"
-            changed = True
+            # Asking the user to approve being asked is a logic loop.
+            # Same for pure planning/state tools — they don't touch the
+            # system, so don't burn an approve prompt on them.
+            if tool in SAFE_TOOLS:
+                pass
+            else:
+                pid = ev.get("request_id") or ev.get("id") or f"req_{int(time.time())}"
+                state.waiting = max(state.waiting, 1)
+                state.prompt = {
+                    "id": pid,
+                    "tool": tool,
+                    "hint": (ev.get("message") or ev.get("hint") or "")[:120],
+                }
+                state.msg = f"approve: {tool}"
+                changed = True
         else:
             # Generic notification — show its message line.
             msg = ev.get("message") or ev.get("title") or ""
