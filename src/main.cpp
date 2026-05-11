@@ -544,7 +544,7 @@ void drawInfo() {
     _infoHeader(p, y, "ABOUT", infoPage);
     spr.setTextColor(p.textDim, p.bg);
     ln("I watch your Claude");
-    ln("desktop sessions.");
+    ln("Code sessions.");
     y += 6;
     ln("I sleep when nothing's");
     ln("happening, wake when");
@@ -557,19 +557,30 @@ void drawInfo() {
     ln("to approve from here.");
     y += 6;
     spr.setTextColor(p.textDim, p.bg);
-    ln("18 species. Settings");
-    ln("> ascii pet to cycle.");
+    ln("Tap A + hold A =");
+    ln("dictate (Typeless).");
 
   } else if (infoPage == 1) {
     _infoHeader(p, y, "BUTTONS", infoPage);
-    spr.setTextColor(p.text, p.bg);    ln("A   front");
-    spr.setTextColor(p.textDim, p.bg); ln("    next screen");
-    ln("    approve prompt"); y += 4;
-    spr.setTextColor(p.text, p.bg);    ln("B   right side");
-    spr.setTextColor(p.textDim, p.bg); ln("    next page");
-    ln("    deny prompt"); y += 4;
-    spr.setTextColor(p.text, p.bg);    ln("hold A");
-    spr.setTextColor(p.textDim, p.bg); ln("    menu"); y += 4;
+    if (bugc2Present) {
+      spr.setTextColor(p.text, p.bg);    ln("A   front");
+      spr.setTextColor(p.textDim, p.bg); ln("    tap: cycle / next");
+      ln("    hold: confirm"); y += 4;
+      spr.setTextColor(p.text, p.bg);    ln("tap+hold A");
+      spr.setTextColor(p.textDim, p.bg); ln("    dictate (PTT)");
+      y += 4;
+      spr.setTextColor(p.text, p.bg);    ln("B  blocked by BugC2");
+    } else {
+      spr.setTextColor(p.text, p.bg);    ln("A   front");
+      spr.setTextColor(p.textDim, p.bg); ln("    tap: next / approve");
+      ln("    hold: menu"); y += 4;
+      spr.setTextColor(p.text, p.bg);    ln("B   right side");
+      spr.setTextColor(p.textDim, p.bg); ln("    tap: page / deny");
+      y += 4;
+      spr.setTextColor(p.text, p.bg);    ln("tap A + hold A");
+      spr.setTextColor(p.textDim, p.bg); ln("    dictate (PTT)");
+    }
+    y += 4;
     spr.setTextColor(p.text, p.bg);    ln("Power  left side");
     spr.setTextColor(p.textDim, p.bg); ln("    tap = screen off");
     ln("    hold 6s = off");
@@ -657,33 +668,36 @@ void drawInfo() {
       spr.setTextColor(p.text, p.bg);
       ln("TO PAIR");
       spr.setTextColor(p.textDim, p.bg);
-      ln(" Open Claude desktop");
-      ln(" > Developer");
-      ln(" > Hardware Buddy");
+      ln(" Run cc-bridge on");
+      ln(" your Mac. It will");
+      ln(" auto-connect via BLE.");
       y += 4;
-      ln(" auto-connects via BLE");
+      ln(" See repo README.");
     }
 
   } else {
     _infoHeader(p, y, "CREDITS", infoPage);
     spr.setTextColor(p.textDim, p.bg);
-    ln("made by");
+    ln("upstream");
     y += 4;
     spr.setTextColor(p.text, p.bg);
     ln("Felix Rieseberg");
-    y += 12;
     spr.setTextColor(p.textDim, p.bg);
-    ln("source");
+    ln(" anthropics/");
+    ln(" claude-desktop-buddy");
+    y += 8;
+    spr.setTextColor(p.textDim, p.bg);
+    ln("this fork");
     y += 4;
     spr.setTextColor(p.text, p.bg);
-    ln("github.com/anthropics");
-    ln("/claude-desktop-buddy");
-    y += 12;
+    ln(" TaoXieSZ/");
+    ln(" claude-code-buddy");
+    y += 8;
     spr.setTextColor(p.textDim, p.bg);
     ln("hardware");
     y += 4;
-    ln("M5StickC Plus");
-    ln("ESP32 + AXP192");
+    ln("M5StickC Plus2");
+    ln("+ BugC2 chassis");
   }
 }
 
@@ -1269,6 +1283,17 @@ void loop() {
       } else if (menuOpen) {
         beep(1800, 30);
         menuSel = (menuSel + 1) % MENU_N;
+      } else if (bugc2Present && displayMode == DISP_INFO &&
+                 infoPage < INFO_PAGES - 1) {
+        // No-B mode: tap A walks through info pages until the last,
+        // then the next tap falls through to cycle displayMode.
+        beep(1800, 30);
+        infoPage++;
+      } else if (bugc2Present && displayMode == DISP_PET &&
+                 petPage < PET_PAGES - 1) {
+        beep(1800, 30);
+        petPage++;
+        applyDisplayMode();
       } else {
         beep(1800, 30);
         displayMode = (displayMode + 1) % DISP_COUNT;
