@@ -331,6 +331,20 @@ class BleWriter:
                 log.info("subscribed to NUS TX")
             except BleakError as e:
                 log.warning("start_notify failed (permission echo disabled): %s", e)
+            # One-shot RTC sync on connect — REFERENCE.md "one-shot on
+            # connect" frame. Claude Desktop sends this, but with the
+            # cursor variant there's no desktop in the loop, so the
+            # stick's clock display would otherwise sit at 2000-01-01
+            # until next coin-cell power. Tz offset comes from the local
+            # OS so the stick shows wall time, not UTC.
+            try:
+                now = time.time()
+                tz_offset = -time.timezone if time.daylight == 0 else -time.altzone
+                line = (json.dumps({"time": [int(now), int(tz_offset)]}) + "\n").encode()
+                await self.client.write_gatt_char(NUS_RX, line, response=False)
+                log.info("rtc sync sent: epoch=%d tz_offset=%d", int(now), int(tz_offset))
+            except (BleakError, asyncio.TimeoutError, OSError) as e:
+                log.warning("rtc sync failed (non-fatal): %s", e)
             log.info("connected")
             return True
 

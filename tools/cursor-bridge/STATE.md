@@ -48,6 +48,10 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
 - **BLE reconnect** — backoff 2 → 4 → 8 → 16 → 30s. macOS CoreBluetooth
   drops idle GATT links so a 2s keepalive heartbeat fires regardless of
   state changes.
+- **One-shot RTC sync on connect** — `{"time":[epoch, tz_offset]}` frame
+  sent immediately after `start_notify` succeeds, every reconnect. The
+  cursor stick has no Claude Desktop in the loop, so without this its
+  clock display sits at 2000-01-01 (or whatever was on the coin cell).
 - **Permission echo plumbing** — wire is there (`wait_permission` RPC,
   `PENDING` futures, `on_stick_line` ack handler) but Cursor's permission
   protocol is not yet hooked into `cursor_hook.js`. Out of scope for v1.
@@ -59,7 +63,6 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
 | Stick-button permission approve for Cursor tool gates | Cursor's permission hook payload differs from Claude Code's `hookSpecificOutput`; needs translation | medium — only matters if Cursor ever exposes pre-tool gates we want stick to gate |
 | Model name display | Cursor doesn't include `model` in its hook payload (verified) | low — buddy has limited screen real estate already |
 | Workspace name | Cursor doesn't include `workspace` in its hook payload | low |
-| RTC time sync from daemon | cc-bridge has it; not yet ported | low — desktop already syncs |
 | PTT mic key relay | cc-bridge has it; intentionally omitted from cursor-bridge | not planned |
 
 ## Verification

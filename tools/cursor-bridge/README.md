@@ -41,21 +41,22 @@ so the merge stays clean.
 
 ## Pin to a specific stick
 
-Two daemons scanning `Claude-*` will fight for whichever device
-advertises first. After install, pin each:
+A stick flashed with `m5stickc-plus2-cursor` advertises as `Cursor-*`
+and a stick flashed with `m5stickc-plus2-claude` advertises as
+`Claude-*`, so the two daemons naturally don't fight for the same
+advertisement — no env-var pinning needed in the standard two-stick
+setup.
+
+If you flashed both sticks with the **same** firmware variant for
+testing, pin by MAC suffix:
 
 ```bash
-# stick #1, owned by cc-bridge:
-launchctl setenv CC_BRIDGE_DEVICE_PREFIX Claude-F7C2
-launchctl kickstart -k gui/$(id -u)/com.cc-bridge
-
-# stick #2, owned by cursor-bridge:
-launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Claude-6DE2
+launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Cursor-6DE2
 launchctl kickstart -k gui/$(id -u)/com.cursor-bridge
 ```
 
-Replace the last-4 with whatever your sticks advertise (`system_profiler
-SPBluetoothDataType | grep Claude-` lists them).
+Replace the last-4 with whatever your stick advertises (`system_profiler
+SPBluetoothDataType | grep -E '(Claude|Cursor)-' ` lists them).
 
 ## Operate
 
@@ -73,15 +74,38 @@ launchctl kickstart -k gui/$(id -u)/com.cursor-bridge
 tools/cursor-bridge/install.sh uninstall
 ```
 
+## State model
+
+See `STATE.md` for the full heartbeat schema, Cursor hook event coverage
+matrix, and known gaps. Short version: every meaningful Cursor IDE
+session signal — prompt submit, tool start/end (incl. failures),
+subagent spawn, assistant turn end + token usage — feeds the buddy.
+Stale sessions get reaped after 10 min idle so counters don't drift.
+
 ## What's not in v1
 
 - **Permission echo** — pressing A/B on the stick to allow/deny an agent
-  tool call. Cursor's permission protocol differs from Claude Code's
-  `hookSpecificOutput` shape; we'll add it as a separate sync hook in a
-  follow-up.
-- **Fancy state mapping** — `beforeMCPExecution` is currently
-  surfaced as `tool_name="mcp:<method>"` and `afterMCPExecution` collapses
-  back to plain `mcp`. Good enough for the buddy to show "running: mcs"
-  but loses per-tool granularity.
+  tool call. Wire is plumbed in `bridge.py` but Cursor doesn't yet
+  surface a clean pre-tool-gate hook event we can intercept.
+- **Fancy MCP state mapping** — `beforeMCPExecution` is surfaced as
+  `tool_name="mcp:<method>"` and `afterMCPExecution` collapses back to
+  plain `mcp`. Good enough for "running: mcp:..." display but loses
+  per-tool granularity.
+
+## Footgun: macOS BLE pairing after firmware re-flash
+
+After `esptool.py erase_flash` or any operation that resets the stick's
+BLE bonding state, macOS keeps a stale pairing record and rejects every
+reconnect with:
+
+```
+connect failed: Error Domain=CBErrorDomain Code=14
+"Peer removed pairing information"
+```
+
+The daemon will retry forever and never succeed. Fix:
+**System Settings → Bluetooth → find the device → ⓘ → Forget This
+Device.** NUS is unbonded so no PIN re-entry needed; the daemon's next
+30s scan reconnects automatically.
 
 See also: `tools/cc-bridge/README.md`, `docs/onboarding-next-stick.md`.
