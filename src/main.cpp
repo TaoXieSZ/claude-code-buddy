@@ -5,7 +5,6 @@
 #include "ble_bridge.h"
 #include "bugc2.h"
 #include "data.h"
-#include "buddy.h"
 #include "audio_capture.h"
 #include "audio_ble.h"
 
@@ -63,27 +62,11 @@ bool     dimmed = false;
 bool     screenOff = false;
 bool     swallowBtnA = false;
 bool     swallowBtnB = false;
-bool     buddyMode = false;
 bool     gifAvailable = false;
-const uint8_t SPECIES_GIF = 0xFF;   // species NVS sentinel: use the installed GIF
 
-// Cycle GIF (if installed) → ASCII species 0..N-1 → GIF. Persisted to the
-// existing "species" NVS key; 0xFF means GIF mode.
-static void nextPet() {
-  uint8_t n = buddySpeciesCount();
-  if (!buddyMode) {                          // GIF → species 0
-    buddyMode = true;
-    buddySetSpeciesIdx(0);
-    speciesIdxSave(0);
-  } else if (buddySpeciesIdx() + 1 >= n && gifAvailable) {  // last species → GIF
-    buddyMode = false;
-    speciesIdxSave(SPECIES_GIF);
-  } else {                                   // species i → species i+1
-    buddyNextSpecies();
-  }
-  characterInvalidate();
-  if (buddyMode) buddyInvalidate();
-}
+// ASCII species removed — clawd GIF is the only pet. Menu still calls this
+// (entry kept for layout); we just re-render the same character.
+static void nextPet() { characterInvalidate(); }
 uint32_t wakeTransitionUntil = 0;
 const uint32_t SCREEN_OFF_MS = 30000;
 
@@ -129,7 +112,6 @@ const uint8_t INFO_PG_CREDITS = 5;
 void applyDisplayMode() {
   bool peek = displayMode != DISP_NORMAL;
   characterSetPeek(peek);
-  buddySetPeek(peek);
   // Clear the whole sprite on mode switch. drawInfo/drawPet clear their
   // own regions when they run, but when you switch FROM info/pet TO normal,
   // those functions stop running and their stale pixels stay behind. Full
@@ -279,9 +261,7 @@ static void drawSettings() {
       static const char* const RN[] = { "auto", "port", "land" };
       spr.print(RN[s.clockRot]);
     } else if (i == 7) {
-      uint8_t total = buddySpeciesCount() + (gifAvailable ? 1 : 0);
-      uint8_t pos   = buddyMode ? buddySpeciesIdx() + 1 : total;
-      spr.printf("%u/%u", pos, total);
+      spr.print(gifAvailable ? "clawd" : "none");
     }
   }
   drawMenuHints(p, mx, mw, my + mh - 12, "Next", "Change");
@@ -462,21 +442,10 @@ static void drawClock() {
   static uint32_t lastPetTick = 0;
   if (millis() - lastPetTick >= 200) {
     lastPetTick = millis();
-    if (buddyMode) {
-      // ASCII glyphs don't self-clear; wipe the box each tick. Species
-      // hardcode BUDDY_X_CENTER=67 / BUDDY_Y_OVERLAY=6 for particles so
-      // keep portrait coords and just swap the surface — pet lands
-      // upper-left of landscape, which is where we want it anyway.
-      M5.Lcd.fillRect(0, 0, 115, 90, p.bg);
-      buddyRenderTo(&M5.Lcd, activeState);
-    } else {
-      // Full-frame GIFs paint every pixel (transparent → pal.bg), so a
-      // per-tick clear just adds a visible black flash between wipe and
-      // last scanline. The entry fillScreen on paintedOrient change
-      // already covers the surround.
-      characterSetState(activeState);
-      characterRenderTo(&M5.Lcd, 57, 45);
-    }
+    // Full-frame GIFs paint every pixel (transparent → pal.bg). The entry
+    // fillScreen on paintedOrient change covers the surround.
+    characterSetState(activeState);
+    characterRenderTo(&M5.Lcd, 57, 45);
   }
   M5.Lcd.setRotation(0);
 }
@@ -975,7 +944,6 @@ void setup() {
   statsLoad();
   settingsLoad();
   petNameLoad();
-  buddyInit();
 
   // BLE stays always-on; s.bt is stored as a preference only.
   spr.setColorDepth(16);
@@ -985,10 +953,6 @@ void setup() {
   }
   characterInit(nullptr);  // scan /characters/ for whatever is installed
   gifAvailable = characterLoaded();
-  // species NVS: 0..N-1 = ASCII species, 0xFF = use GIF (also the default,
-  // so a fresh install lands on the GIF). With no GIF installed, 0xFF falls
-  // through to buddyInit()'s clamped default.
-  buddyMode = !(gifAvailable && speciesIdxLoad() == SPECIES_GIF);
   applyDisplayMode();
 
   {
@@ -1013,7 +977,7 @@ void setup() {
     delay(1800);
   }
 
-  Serial.printf("buddy: %s\n", buddyMode ? "ASCII mode" : "GIF character loaded");
+  Serial.printf("buddy: %s\n", gifAvailable ? "GIF character loaded" : "no character");
 
   if (bugc2_begin()) Serial.println("bugc2: present");
   else               Serial.println("bugc2: not present");
@@ -1128,7 +1092,6 @@ void loop() {
       menuOpen = settingsOpen = resetOpen = false;
       applyDisplayMode();
       characterInvalidate();
-      if (buddyMode) buddyInvalidate();
     }
   }
 
@@ -1255,7 +1218,6 @@ void loop() {
     if (clocking && !landscapeClock) characterSetPeek(true);
     else applyDisplayMode();
     characterInvalidate();
-    if (buddyMode) buddyInvalidate();
     wasClocking = clocking;
     wasLandscape = landscapeClock;
   }
@@ -1282,8 +1244,6 @@ void loop() {
   if (napping || screenOff || landscapeClock) {
     // skip sprite render — face-down, powered off, or landscape clock
     // (which draws direct-to-LCD below)
-  } else if (buddyMode) {
-    buddyTick(activeState);
   } else if (characterLoaded()) {
     characterSetState(activeState);
     characterTick();

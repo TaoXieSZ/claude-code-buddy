@@ -1,7 +1,9 @@
-# Onboarding a second stick (and future editor integrations)
+# Onboarding a second stick (and Cursor integration)
 
-Notes for setting up another M5StickC Plus2 + BugC2 unit, and a placeholder
-plan for adding **Cursor** alongside Claude Desktop / Claude Code.
+Notes for setting up another M5StickC Plus2 + BugC2 unit and wiring it
+to **Cursor** (in addition to Claude Desktop / Claude Code on the first
+stick). The "Future: Cursor integration" section that used to live here
+is now implemented — see [`tools/cursor-bridge/`](../tools/cursor-bridge/).
 
 ## Flash gotchas (learned the hard way)
 
@@ -114,48 +116,91 @@ you actually need both sticks live at once.
 **One stick = Claude Desktop, the other = Cursor**: that's the natural
 split for this fork's two-stick setup. See below.
 
-## Future: Cursor integration
+## Cursor integration (now: `tools/cursor-bridge/`)
 
-Cursor has a similar agent system to Claude Code, but its hook protocol
-differs. To wire Cursor up to a stick, the daemon side mostly stays —
-we just need a Cursor-side equivalent of `tools/cc-bridge/hook.py` that
-emits the same heartbeat schema.
+Cursor's hook system writes events to `~/.cursor/hooks.json` and shells
+out to a script of your choice for each event. We use that — no MCP
+server required.
 
-Investigation TODO before implementing:
-
-- [ ] Does Cursor expose a hook/event API on agent lifecycle?
-  Check `~/.cursor/settings.json` and the Cursor docs for "hooks",
-  "PreToolUse", "Notification", or MCP server lifecycle events.
-- [ ] If no hook system, fall back to **MCP server** approach — write a
-  small MCP server that Cursor connects to as a tool provider. The
-  server itself maintains the BLE bridge to the stick and emits state
-  to it whenever Cursor calls in.
-- [ ] If Cursor uses something like LangSmith / OpenTelemetry traces,
-  point those at our daemon socket instead of writing a new shim.
-
-Architecture sketch (two-stick scenario):
+Architecture (two-stick scenario):
 
 ```
 Claude Code (terminal)         Cursor (editor)
-   │ hook.py                      │ cursor-hook.py (tbd)
+   │ hook.py / hook_permission.py │ cursor_hook.js
    ▼                              ▼
 /tmp/cc-bridge.sock         /tmp/cursor-bridge.sock
    │                              │
-bridge.py (Claude-F7C2)     bridge.py (Claude-OTHER)
+bridge.py (Claude-F7C2)     bridge.py (Claude-6DE2)
    │                              │
-M5StickC #1 (lives on Mac1's  M5StickC #2 (or same Mac, two daemons,
-desk) — Claude Code stick     two BLE name prefixes)
+M5StickC #1                  M5StickC #2
+(clawd pack)                 (calico pack)
 ```
 
-The bridge daemon already has the `CC_BRIDGE_DEVICE_PREFIX` knob, so
-two instances with different prefixes can target two sticks. The hook
-script on Cursor side is the unbuilt piece.
+Both daemons speak the same heartbeat schema (REFERENCE.md), so the
+firmware is byte-identical on both sticks. cursor-bridge translates
+Cursor's hook event names into the Claude Code names that
+`bridge.py:apply_event()` already handles — see the table in
+`tools/cursor-bridge/cursor_hook.js`.
 
-Before starting work: confirm Cursor actually has an addressable hook
-system. If it's MCP-only, the bridge becomes an MCP server with one
-tool (`buddy_notify`) that Cursor calls and the daemon turns into a
-heartbeat — different shape from the cc-bridge socket protocol but the
-BLE layer is unchanged.
+### Onboarding stick #2 for Cursor — full sequence
+
+Assumes you already have stick #1 paired and cc-bridge running.
+
+1. **Flash this fork's firmware to stick #2.**
+   Stock upstream firmware uses an encrypted-only NUS that bleak fights
+   on macOS. This fork adds a debug-NUS service that cc-bridge /
+   cursor-bridge speak.
+   ```bash
+   pio run -e m5stickc-plus2 -t upload --upload-port /dev/cu.usbserial-XXXX
+   ```
+   If you previously paired stick #2 with Claude Desktop on the
+   upstream firmware, **forget the device** in System Settings →
+   Bluetooth and toggle Bluetooth off/on (see §4 above for the GATT
+   cache gotcha).
+
+2. **Flash a character pack.** `calico` ships in this fork:
+   ```bash
+   python3 tools/flash_character.py characters/calico
+   ```
+   Or stick with `clawd` and visually distinguish the two sticks some
+   other way (different button-press habit, sticker on the back).
+
+3. **Pair stick #2 with macOS.** System Settings → Bluetooth, enter the
+   6-digit passkey shown on the stick screen. One-time bond.
+
+4. **Install cursor-bridge.**
+   ```bash
+   tools/cursor-bridge/install.sh
+   ```
+   Reads (and backs up) `~/.cursor/hooks.json`, merges 11 hook entries
+   that point at `cursor_hook.js`. Other consumers (vibe-island, ahakey,
+   omc, omr, clawd-on-desk) are left untouched.
+
+5. **Pin both daemons** so they don't race for the same advertising
+   stick. Replace `XXXX` with the last 4 hex of each stick's MAC
+   (`system_profiler SPBluetoothDataType | grep Claude-` lists them):
+   ```bash
+   launchctl setenv CC_BRIDGE_DEVICE_PREFIX     Claude-F7C2
+   launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Claude-6DE2
+   launchctl kickstart -k gui/$(id -u)/com.cc-bridge
+   launchctl kickstart -k gui/$(id -u)/com.cursor-bridge
+   ```
+
+6. **Verify.** In Cursor, fire any agent action.
+   ```bash
+   tail -f ~/Library/Logs/cursor-bridge.log
+   ```
+   Within ~10s the second stick should switch from idle → "thinking…"
+   → "running: shell" → "ready" as you exercise the agent.
+
+### What v1 doesn't do
+
+- **Stick approval gating.** cc-bridge has `hook_permission.py` that
+  blocks Claude Code's PreToolUse and waits for an A/B button press.
+  Cursor's permission API has a different shape (and may run inside
+  the editor process rather than via shell hook); deferred to v2.
+- **Per-tool granularity for MCP calls.** All MCP invocations show up
+  as `mcp:<method>` rather than the full upstream tool name.
 
 ## Useful one-liners
 

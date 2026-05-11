@@ -87,12 +87,8 @@ inline bool xferCommand(JsonDocument& doc) {
   }
 
   if (strcmp(cmd, "species") == 0) {
-    extern bool buddyMode, gifAvailable;
-    extern void buddySetSpeciesIdx(uint8_t);
-    uint8_t idx = doc["idx"] | 0xFF;
-    speciesIdxSave(idx);
-    buddyMode = !(gifAvailable && idx == 0xFF);
-    if (buddyMode) buddySetSpeciesIdx(idx);
+    // ASCII species removed — only the clawd GIF is supported now.
+    // Ack so the desktop app stops retrying; ignore the idx.
     _xAck("species", true);
     return true;
   }
@@ -226,8 +222,8 @@ inline bool xferCommand(JsonDocument& doc) {
   if (strcmp(cmd, "char_end") == 0) {
     _xActive = false;
     bool ok = characterInit(_xCharName);
-    extern bool buddyMode, gifAvailable;
-    if (ok) { buddyMode = false; gifAvailable = true; speciesIdxSave(0xFF); }
+    extern bool gifAvailable;
+    if (ok) gifAvailable = true;
     _xAck("char_end", ok);
     return true;
   }

@@ -21,7 +21,6 @@ What you get:
   firmware changes, just a new producer
 - **Web Bluetooth motor calibrator** for the BugC2 chassis (sliders,
   WASD, 16 sign-combo presets)
-- 18 fallback ASCII pets if you don't want the GIF runtime
 
 Forked from
 [`anthropics/claude-desktop-buddy`](https://github.com/anthropics/claude-desktop-buddy)
@@ -87,13 +86,7 @@ then **Developer → Open Hardware Buddy…** in Claude desktop, click
 The screen auto-powers-off after 30s of no interaction (kept on while an
 approval prompt is up). Any button press wakes it.
 
-## ASCII pets
-
-Nineteen species, each with seven animations (sleep, idle, busy, attention,
-celebrate, dizzy, heart). **Crab** (Claude mascot) is the default. Menu →
-"next pet" cycles them with a counter; choice persists to NVS.
-
-## GIF pets
+## GIF character
 
 The default GIF pack is **clawd**, with all sprite art credit to
 [`rullerzhou-afk/clawd-on-desk`](https://github.com/rullerzhou-afk/clawd-on-desk)
@@ -213,11 +206,13 @@ src/
   data.h         — wire protocol, JSON parse (incl. {"cmd":"motor",...})
   xfer.h         — folder push receiver
   stats.h        — NVS-backed stats, settings, owner, species choice
-characters/      — bufo (upstream), clawd (this fork)
+characters/      — bufo (upstream), clawd, calico (this fork)
 tools/
   prep_character.py   — resize source GIFs to 120px / per-state bbox
   flash_character.py  — fast USB uploadfs path (skips BLE)
   motor-calib.html    — Web Bluetooth BugC2 calibrator
+  cc-bridge/          — Claude Code (CLI) hooks → stick (daemon + hooks)
+  cursor-bridge/      — Cursor IDE hooks → second stick (parallel daemon)
 mac-helper/      — Swift package: clipboard sync helper
 .omc/            — OMC tooling state (gitignored)
 ```
@@ -226,8 +221,9 @@ mac-helper/      — Swift package: clipboard sync helper
 
 Got a second M5StickC? See **[docs/onboarding-next-stick.md](docs/onboarding-next-stick.md)** —
 flash gotchas (USB cable, GATT cache, heap watch), per-stick port
-disambiguation, and a sketch for running two sticks against
-Claude Code + Cursor in parallel.
+disambiguation, and full step-by-step for running two sticks against
+Claude Code (`tools/cc-bridge/`) and Cursor (`tools/cursor-bridge/`) in
+parallel, each with its own character pack.
 
 ## TODO
 

@@ -1,0 +1,193 @@
+#!/usr/bin/env node
+//
+// Cursor IDE hook → cursor-bridge daemon shim.
+//
+// Cursor fires this for each registered hook event. We read the JSON
+// payload off stdin, translate it into a Claude-Code-shaped event that
+// bridge.py's apply_event() already understands, forward it to the
+// bridge daemon over a Unix socket, and exit immediately.
+//
+// Any failure (daemon down, socket missing, bad JSON, etc.) exits 0
+// silently — the hook MUST NOT block Cursor on a side channel that may
+// be temporarily offline.
+//
+// Wired up by tools/cursor-bridge/install.sh into ~/.cursor/hooks.json
+// under the relevant Cursor hook events (sessionStart,
+// beforeSubmitPrompt, beforeShellExecution, ...).
+//
+// Permission echo (button-on-stick approval) is NOT implemented in v1.
+// Cursor's permission protocol differs from Claude Code's hookSpecificOutput
+// shape; we'll wire it up in a follow-up.
+
+'use strict';
+
+const fs   = require('fs');
+const net  = require('net');
+const path = require('path');
+
+const SOCKET_PATH = process.env.CURSOR_BRIDGE_SOCKET || '/tmp/cursor-bridge.sock';
+const TIMEOUT_MS  = 500; // never slow Cursor down for our side channel
+
+// ─── Cursor → Claude Code event translation ────────────────────────────
+//
+// bridge.py's apply_event() switches on `hook_event_name` matching the
+// Claude Code names (SessionStart, UserPromptSubmit, PreToolUse, ...).
+// We map Cursor's hook event names onto those, attaching the same
+// fields apply_event() reads (tool_name, tool_input, prompt, ...).
+//
+// For unknown events we exit 0 silently — better to drop than to
+// generate confusing state mutations.
+
+function translate(ev) {
+    const cursorName = ev.hook_event_name || ev.event || '';
+    const sid =
+        ev.session_id || ev.sessionId || ev.conversation_id || 'anon';
+    const base = { session_id: sid };
+
+    switch (cursorName) {
+        case 'sessionStart':
+            return { ...base, hook_event_name: 'SessionStart' };
+
+        case 'sessionEnd':
+            return { ...base, hook_event_name: 'SessionEnd' };
+
+        case 'beforeSubmitPrompt': {
+            const prompt =
+                ev.prompt || ev.user_prompt || ev.userPrompt || ev.text || '';
+            return {
+                ...base,
+                hook_event_name: 'UserPromptSubmit',
+                prompt: String(prompt),
+            };
+        }
+
+        case 'afterAgentResponse':
+        case 'afterAgentThought':
+        case 'stop':
+            return { ...base, hook_event_name: 'Stop' };
+
+        case 'beforeShellExecution': {
+            const ti = ev.tool_input || {};
+            const cmd = ev.command || ti.command || ev.shell_command || '';
+            return {
+                ...base,
+                hook_event_name: 'PreToolUse',
+                tool_name: 'shell',
+                tool_input: { command: String(cmd).slice(0, 200) },
+            };
+        }
+        case 'afterShellExecution':
+            return {
+                ...base,
+                hook_event_name: 'PostToolUse',
+                tool_name: 'shell',
+            };
+
+        case 'beforeMCPExecution': {
+            const tool = ev.tool || ev.tool_name || ev.method || 'mcp';
+            const desc = ev.description || ev.summary || '';
+            return {
+                ...base,
+                hook_event_name: 'PreToolUse',
+                tool_name: `mcp:${String(tool).slice(0, 40)}`,
+                tool_input: { description: String(desc).slice(0, 120) },
+            };
+        }
+        case 'afterMCPExecution':
+            return {
+                ...base,
+                hook_event_name: 'PostToolUse',
+                tool_name: 'mcp',
+            };
+
+        case 'beforeReadFile': {
+            const fp = ev.file_path || ev.path || ev.filePath || '';
+            return {
+                ...base,
+                hook_event_name: 'PreToolUse',
+                tool_name: 'read',
+                tool_input: { file_path: String(fp).slice(0, 200) },
+            };
+        }
+
+        case 'afterFileEdit': {
+            const fp = ev.file_path || ev.path || ev.filePath || '';
+            return {
+                ...base,
+                hook_event_name: 'PostToolUse',
+                tool_name: 'edit',
+                tool_input: { file_path: String(fp).slice(0, 200) },
+            };
+        }
+
+        case 'preToolUse':
+            // Generic Cursor tool gate (for non-shell/non-MCP tools).
+            return {
+                ...base,
+                hook_event_name: 'PreToolUse',
+                tool_name: ev.tool_name || ev.tool || 'tool',
+            };
+        case 'postToolUse':
+        case 'postToolUseFailure':
+            return {
+                ...base,
+                hook_event_name: 'PostToolUse',
+                tool_name: ev.tool_name || ev.tool || 'tool',
+            };
+
+        case 'subagentStart':
+        case 'subagentStop':
+            // No clean mapping — emit as a Stop-ish noop so the buddy
+            // doesn't go stale, but don't mutate session counts.
+            return null;
+
+        default:
+            return null;
+    }
+}
+
+// ─── main ──────────────────────────────────────────────────────────────
+function main() {
+    let raw;
+    try {
+        raw = fs.readFileSync(0, 'utf8'); // stdin
+    } catch (_) {
+        process.exit(0);
+    }
+    if (!raw) process.exit(0);
+
+    let ev;
+    try {
+        ev = JSON.parse(raw);
+    } catch (_) {
+        process.exit(0);
+    }
+
+    const translated = translate(ev);
+    if (!translated) process.exit(0);
+
+    const payload = JSON.stringify(translated) + '\n';
+
+    const sock = net.createConnection(SOCKET_PATH);
+    let done = false;
+    const finish = () => {
+        if (done) return;
+        done = true;
+        try { sock.end(); } catch (_) {}
+        process.exit(0);
+    };
+    sock.setTimeout(TIMEOUT_MS, finish);
+    sock.on('error',   finish);
+    sock.on('connect', () => {
+        try {
+            sock.write(payload, finish);
+        } catch (_) {
+            finish();
+        }
+    });
+
+    // Hard cap in case the socket layer hangs.
+    setTimeout(finish, TIMEOUT_MS + 100).unref();
+}
+
+main();
