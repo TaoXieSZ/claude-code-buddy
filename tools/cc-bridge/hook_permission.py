@@ -35,6 +35,22 @@ DECISION_MAP = {
     "ask": "ask",
 }
 
+# Tools that never need stick approval — they're interactive prompts or
+# pure planning/state tools that don't touch the system. Asking the user
+# to approve being asked (AskUserQuestion) is a logic loop.
+SAFE_TOOLS = {
+    "AskUserQuestion",
+    "ExitPlanMode",
+    "EnterPlanMode",
+    "TodoWrite",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskList",
+    "TaskGet",
+    "TaskOutput",
+    "TaskStop",
+}
+
 
 def _emit(decision: str | None, reason: str = ""):
     """Print Claude Code's hookSpecificOutput JSON and exit."""
@@ -73,6 +89,8 @@ def main() -> int:
         return 0
 
     tool = ev.get("tool_name") or "tool"
+    if tool in SAFE_TOOLS:
+        return 0
     sid = (ev.get("session_id") or "anon")[:8]
     rid = ev.get("request_id") or f"req_{sid}_{int(time.time() * 1000)}"
     ti = ev.get("tool_input") or {}
