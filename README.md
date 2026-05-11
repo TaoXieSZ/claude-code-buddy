@@ -1,53 +1,57 @@
 # claude-code-buddy
 
-A tiny crab on your desk that lives your AI coding session with you.
-It sleeps when you idle, paces when the agent is thinking, blinks amber
-when a tool needs your approval, and throws confetti when you ship a
-turn. The whole thing fits in your palm.
+Firmware + desktop daemons for an M5StickC PLUS2 that mirror the state
+of an AI coding session over BLE. Driven by the same wire protocol
+upstream Claude Desktop uses; this fork adds two new producer daemons
+so the same stick can also be driven by Claude Code (CLI) or Cursor (IDE).
 
-This fork extends upstream by adding bridges for **three** producers
-that all drive the same 1.14" screen + optional robot chassis:
-
-| Producer | How it talks to the stick | What lights up |
+| Producer | Implementation | Notes |
 |---|---|---|
-| **Claude Desktop** | Official BLE bridge (upstream, unchanged) | Session state, level-ups, owner name, time |
-| **Claude Code (CLI)** | `tools/cc-bridge/` — launchd daemon + hook | All of the above + **press A on the stick to approve tool calls** without touching the keyboard |
-| **Cursor IDE** | `tools/cursor-bridge/` — launchd daemon + Node shim | Prompt echo, current tool, subagent activity (great for Multitask Mode), token counter, failure marker. See [tools/cursor-bridge/STATE.md](tools/cursor-bridge/STATE.md) for the full event matrix |
+| Claude Desktop | upstream BLE bridge (unchanged) | reference producer |
+| Claude Code CLI | `tools/cc-bridge/` — launchd Python daemon + hook | supports permission echo: stick button A approves a PreToolUse prompt, B denies |
+| Cursor IDE | `tools/cursor-bridge/` — launchd Python daemon + Node hook shim | mirrors prompt submission, tool start/stop, tool failures, subagent activity, token deltas. State coverage in [`tools/cursor-bridge/STATE.md`](tools/cursor-bridge/STATE.md) |
 
-The two CLI/IDE bridges are designed to run **side by side** against
-two sticks — flash one as `Claude-XXXX` (cc-bridge) and one as
-`Cursor-XXXX` (cursor-bridge); each daemon scans by prefix so they
-don't fight over advertisements.
+Two daemon-driven bridges can run side by side against two sticks on
+one Mac. Each daemon scans by BLE name prefix (`Claude-` vs `Cursor-`)
+so they don't fight over advertisements. Same firmware on both sticks;
+prefix is set by build flag `BUDDY_BRAND_PREFIX`.
 
-Hardware: M5StickC PLUS2 (1.14" colour LCD, 240MHz ESP32, IMU, buzzer)
-on an optional BugC2 chassis (4 DC motors, 2 RGB LEDs). Software: this
-firmware + a small Python daemon per producer. No app needed.
+Hardware: M5StickC PLUS2 (1.14" 135×240 LCD, 240MHz ESP32, IMU,
+buzzer). Optional BugC2 chassis (4 DC motors, 2 RGB LEDs,
+STM32F030 over I2C 0x38). Software: this firmware + one Python daemon
+per producer.
 
-What you get:
+What's new in this fork (vs upstream `anthropics/claude-desktop-buddy`):
 
-- **Clawd** the Claude crab as your default mascot (8-bit pixel art,
-  7 animated moods)
-- **Live session signals on a real screen** — sleeps when idle, paces
-  and chirps when thinking, blinks amber when a permission prompt is
-  waiting, celebrates when you level up, marks failed tool calls with
-  a `!` prefix
-- **Buddy mode for Claude Code (CLI) and Cursor IDE** via launchd
-  daemons that turn hook events into the same heartbeat schema Claude
-  Desktop emits — no firmware changes, just new producers
-- **Stale-session reaper** in the daemons so a Cursor window left open
-  overnight doesn't keep counting against the active-session badge
-- **One-shot RTC sync on every BLE reconnect** so the stick's clock
-  always shows wall time, no Claude Desktop required
-- **Web Bluetooth motor calibrator** for the BugC2 chassis (sliders,
-  WASD, 16 sign-combo presets)
+- `tools/cursor-bridge/` — Cursor IDE producer. Daemon, Node hook shim,
+  install script, state-coverage doc.
+- `tools/cc-bridge/` — Claude Code CLI producer. Includes synchronous
+  PreToolUse permission echo, an unencrypted debug GATT service used to
+  work around macOS+bleak BLE-encryption flakiness during back-to-back
+  tool calls, and a bypass-mode short-circuit.
+- `BUDDY_BRAND_PREFIX` / `BUDDY_BRAND_NAME` / `BUDDY_VARIANT_CURSOR`
+  build flags. Two PlatformIO envs pin them
+  (`m5stickc-plus2-claude`, `m5stickc-plus2-cursor`) along with the
+  default character pack and `upload_port` / `monitor_port`.
+- Stale-session reaper in cursor-bridge: sessions idle >60s drop out
+  of the active-session count.
+- One-shot RTC sync from the daemons on BLE reconnect. Neither the
+  CLI nor the IDE producer has an upstream desktop app sending the
+  periodic time frame, so without this the stick's clock would sit at
+  2000-01-01.
+- Clawd GIF pack (sprite art credit
+  [@rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/clawd-on-desk))
+  as the default character for both variants.
+- M5StickC Plus2 board support via `m5_compat.h` shim over `M5Unified`.
+- BugC2 chassis driver mapping the upstream persona state to motor +
+  LED patterns. I2C protocol verbatim against
+  `m5stack/M5Hat-BugC@c054b6e`.
+- ASCII-buddy renderer (`src/buddies/*.cpp`) retired — GIF path is the
+  only character renderer.
 
-Forked from
-[`anthropics/claude-desktop-buddy`](https://github.com/anthropics/claude-desktop-buddy)
-— heavy thanks to upstream for the wire protocol, BLE bridge, GIF
-runtime, and the entire seven-state persona engine. This project layers
-Plus2 board support, BugC2 chassis driver, the clawd GIF pack, the
-Claude Code bridge, and the Cursor IDE bridge on top. Wire protocol
-unchanged; see [`REFERENCE.md`](REFERENCE.md).
+Wire protocol unchanged; see [`REFERENCE.md`](REFERENCE.md). Heavy
+thanks to upstream for the protocol, BLE service, GIF runtime, and the
+seven-state persona engine.
 
 <p align="center">
   <img src="docs/device-plus2-bugc2.jpg" alt="M5StickC Plus2 mounted on a BugC2 chassis, screen showing the clawd buddy with mood/fed/energy stats" width="500">
