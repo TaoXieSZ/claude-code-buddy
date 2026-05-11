@@ -16,9 +16,13 @@ Lifecycle:
   - Stick must be bonded with macOS first (System Settings → Bluetooth,
     enter the 6-digit passkey shown on the stick screen). This is a
     one-time UX dance that bleak's connect path expects.
-  - Daemon scans for advertising name "Claude-*", connects to NUS RX
+  - Daemon scans for advertising name "Cursor-*", connects to NUS RX
     characteristic, and stays connected. On disconnect (stick power
-    off, desktop took over, etc.), it reconnects with backoff.
+    off, desktop took over, etc.), it reconnects with backoff. The
+    Cursor- prefix is what a stick flashed with the
+    `m5stickc-plus2-cursor` PlatformIO env advertises — distinct from
+    cc-bridge's `Claude-` so the two daemons can coexist on the same
+    Mac without racing for the same advertisement.
   - Hook events arrive as one JSON object per line on the Unix socket.
     cursor_hook.js translates the Cursor hook schema (sessionStart,
     beforeSubmitPrompt, beforeShellExecution, ...) into Claude-Code-shaped
@@ -27,9 +31,11 @@ Lifecycle:
     keepalive heartbeat fires regardless.
 
 Pin to a specific stick when running cc-bridge and cursor-bridge on the
-same Mac — otherwise both daemons will race for the first matching
-device:
-    launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Claude-6DE2
+same Mac. With the -cursor firmware variant the default prefix is
+"Cursor-" so the two bridges naturally don't collide; this env var
+is only needed if you flashed both sticks with the same firmware
+variant and need to pin by MAC suffix:
+    launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Cursor-6DE2
     launchctl kickstart -k gui/$(id -u)/com.cursor-bridge
 
 Run manually:
@@ -60,7 +66,7 @@ except ImportError:
 
 # ─── config ────────────────────────────────────────────────────────────
 SOCKET_PATH = os.environ.get("CURSOR_BRIDGE_SOCKET", "/tmp/cursor-bridge.sock")
-DEVICE_PREFIX = os.environ.get("CURSOR_BRIDGE_DEVICE_PREFIX", "Claude-")
+DEVICE_PREFIX = os.environ.get("CURSOR_BRIDGE_DEVICE_PREFIX", "Cursor-")
 LOG_PATH = os.environ.get(
     "CURSOR_BRIDGE_LOG", str(Path.home() / "Library/Logs/cursor-bridge.log")
 )
@@ -269,7 +275,7 @@ class BleWriter:
                     device = d
                     break
             if not device:
-                log.warning("no Claude-* device in scan")
+                log.warning("no %s* device in scan", DEVICE_PREFIX)
                 return False
             log.info("connecting to %s (%s)", device.name, device.address)
             self.address = device.address

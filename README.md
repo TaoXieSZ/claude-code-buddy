@@ -213,6 +213,10 @@ tools/
   motor-calib.html    — Web Bluetooth BugC2 calibrator
   cc-bridge/          — Claude Code (CLI) hooks → stick (daemon + hooks)
   cursor-bridge/      — Cursor IDE hooks → second stick (parallel daemon)
+platformio.ini   — three Plus2 build envs:
+  m5stickc-plus2          plain (Claude- BLE name, scan LittleFS for char)
+  m5stickc-plus2-claude   pinned to Claude- + clawd default character
+  m5stickc-plus2-cursor   pinned to Cursor- + calico default character
 mac-helper/      — Swift package: clipboard sync helper
 .omc/            — OMC tooling state (gitignored)
 ```

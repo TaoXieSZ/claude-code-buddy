@@ -19,9 +19,13 @@
 #   - Pair the second stick with macOS once (System Settings → Bluetooth,
 #     enter the 6-digit passkey shown on the stick screen). bleak needs
 #     the bond.
-#   - Pin the daemon to that stick so it doesn't fight cc-bridge for
-#     the first scan match:
-#       launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Claude-XXXX
+#   - With the -cursor firmware variant the stick advertises as
+#     "Cursor-XXXX" and this daemon scans for the "Cursor-" prefix by
+#     default, so it won't race cc-bridge (which scans "Claude-"). No
+#     manual pinning needed in the common case. Only if both sticks
+#     happen to advertise the same prefix (e.g. you flashed both with
+#     the plain `m5stickc-plus2` env), pin by MAC suffix:
+#       launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Cursor-6DE2
 #       launchctl kickstart -k gui/$(id -u)/com.cursor-bridge
 #   - Open Cursor, fire any agent action — within ~10s the stick should
 #     react.
@@ -210,17 +214,24 @@ cat <<EOF
 ✓ cursor-bridge installed.
 
 Next steps:
-  1. Pair stick #2 with macOS via System Settings → Bluetooth (enter the
+  1. Flash stick #2 with the -cursor firmware variant:
+       pio run -e m5stickc-plus2-cursor -t upload \\
+              --upload-port /dev/cu.usbserial-XXXXXX
+     This builds a binary that advertises as "Cursor-XXXX" (vs cc-bridge's
+     "Claude-XXXX") and ships with the calico character pack as default.
+  2. Pair the stick with macOS via System Settings → Bluetooth (enter the
      6-digit passkey shown on the stick screen). One-time bond per Mac.
-  2. Pin this daemon to that stick so it doesn't race cc-bridge for the
-     same device. Replace XXXX with the last 4 hex of the stick's MAC
-     (e.g. Claude-6DE2):
-       launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Claude-XXXX
-       launchctl kickstart -k gui/\$(id -u)/${PLIST_LABEL}
   3. Watch the daemon log:
        tail -f ${LOG_DIR}/cursor-bridge.log
+     You should see "scanning for stick (prefix=Cursor-)" → "connecting to
+     Cursor-XXXX" within ~10s of the launchd agent starting.
   4. Open Cursor, run any agent action — within ~10s the stick should
      react.
+
+  (If you flashed stick #2 with the plain m5stickc-plus2 env instead, it
+  still advertises as Claude-XXXX; in that case pin by MAC suffix:
+       launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Claude-XXXX
+       launchctl kickstart -k gui/\$(id -u)/${PLIST_LABEL})
 
 Tweak:
   - Disable temporarily:

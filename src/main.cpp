@@ -10,14 +10,21 @@
 
 M5Canvas spr;  // parent set lazily in setup() to avoid static-init order trap
 
-// Advertise as "Claude-XXXX" (last two BT MAC bytes) so multiple sticks
-// in one room are distinguishable in the desktop picker. Name persists in
+// Advertise as "<prefix>XXXX" (last two BT MAC bytes) so multiple sticks
+// in one room are distinguishable in the desktop picker. Default prefix
+// is "Claude-"; the -cursor build env overrides it to "Cursor-" via
+// BUDDY_BRAND_PREFIX so a Cursor-pinned stick shows up under its own
+// name in the macOS Bluetooth list and the cursor-bridge daemon can
+// scan for it without needing to pin the MAC suffix. Name persists in
 // btName for the BLUETOOTH info page.
-static char btName[16] = "Claude";
+#ifndef BUDDY_BRAND_PREFIX
+#define BUDDY_BRAND_PREFIX "Claude-"
+#endif
+static char btName[16];
 static void startBt() {
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_BT);
-  snprintf(btName, sizeof(btName), "Claude-%02X%02X", mac[4], mac[5]);
+  snprintf(btName, sizeof(btName), BUDDY_BRAND_PREFIX "%02X%02X", mac[4], mac[5]);
   bleInit(btName);
 }
 
@@ -951,7 +958,17 @@ void setup() {
   if (!spr.createSprite(W, H)) {
     Serial.println("[spr] createSprite FAILED — Plus2 8-bit heap exhausted; check audio/BLE buffer sizes");
   }
-  characterInit(nullptr);  // scan /characters/ for whatever is installed
+  // Default character: -claude env compiles in "clawd", -cursor env
+  // compiles in "calico", plain env passes nullptr → fall back to
+  // scanning /characters/ for the first installed pack. With a default
+  // baked in, characterInit also falls through to the scan when the
+  // named pack isn't on this stick's LittleFS, so a stick reflashed
+  // between firmwares stays usable.
+#ifdef BUDDY_DEFAULT_CHAR
+  if (!characterInit(BUDDY_DEFAULT_CHAR)) characterInit(nullptr);
+#else
+  characterInit(nullptr);
+#endif
   gifAvailable = characterLoaded();
   applyDisplayMode();
 

@@ -23,16 +23,23 @@ within 1-2 s.
 ### 2. Build command
 
 ```bash
-# Program flash (firmware):
-pio run -e m5stickc-plus2 -t upload --upload-port /dev/cu.usbserial-XXXXXXX
+# Program flash (firmware) — pick the env matching how you'll use this stick:
+pio run -e m5stickc-plus2-claude -t upload --upload-port /dev/cu.usbserial-XXXXXXX
+# or:
+pio run -e m5stickc-plus2-cursor -t upload --upload-port /dev/cu.usbserial-XXXXXXX
+# or the plain (legacy) env without baked-in brand/character defaults:
+pio run -e m5stickc-plus2        -t upload --upload-port /dev/cu.usbserial-XXXXXXX
 
 # LittleFS partition (GIF character pack):
-python3 tools/flash_character.py characters/clawd
+python3 tools/flash_character.py characters/clawd      # for -claude env
+python3 tools/flash_character.py characters/calico     # for -cursor env
 ```
 
 The two flashes are independent. After firmware flash, LittleFS is
-preserved (clawd stays). After uploadfs, program is preserved. Boot is
-where they meet — the firmware enumerates `/characters/<name>/`.
+preserved (whatever pack you had stays). After uploadfs, program is
+preserved. Boot is where they meet — the firmware tries
+`BUDDY_DEFAULT_CHAR` first (e.g. `clawd` for -claude), then falls back
+to scanning `/characters/<name>/` if that named pack isn't installed.
 
 ### 3. Per-stick port name
 
@@ -95,26 +102,40 @@ Idempotent on re-run. Uninstall: `tools/cc-bridge/install.sh uninstall`.
 
 ## Two sticks, one Mac
 
-Hardware: each stick advertises as `Claude-XXXX` where XXXX is from its
-MAC address (last 4 hex). They have different USB serial numbers too.
+The cleanest split is to flash each stick with a different PlatformIO
+build env so they advertise under different BLE names and ship with
+different default character packs:
+
+| Stick | PlatformIO env | Advertises as | Default char pack | Bridge daemon |
+|---|---|---|---|---|
+| #1 (Claude Code) | `m5stickc-plus2-claude` | `Claude-XXXX` | `clawd` | cc-bridge |
+| #2 (Cursor) | `m5stickc-plus2-cursor` | `Cursor-XXXX` | `calico` | cursor-bridge |
+
+The `m5stickc-plus2-claude` / `m5stickc-plus2-cursor` envs share source
+with the plain `m5stickc-plus2` env; they only differ in two
+compile-time constants (`BUDDY_BRAND_PREFIX`, `BUDDY_DEFAULT_CHAR`)
+defined in `platformio.ini` build flags.
+
+**Why two BLE names matter**: cc-bridge scans for `Claude-`,
+cursor-bridge scans for `Cursor-`. Different prefixes means the two
+daemons can't accidentally connect to each other's stick. No
+launchctl `setenv DEVICE_PREFIX Claude-XXXX` MAC-suffix pinning
+needed in this configuration.
+
+**Backwards compatible**: a stick already flashed with the plain
+`m5stickc-plus2` env still works — it advertises as `Claude-XXXX` and
+scans LittleFS for any installed character. cursor-bridge can still
+attach to it, but you'd then need to pin by MAC suffix as the bridges
+share a prefix:
+
+```bash
+launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Claude-6DE2
+launchctl kickstart -k gui/$(id -u)/com.cursor-bridge
+```
 
 **Pairing**: each stick paired separately in macOS Bluetooth.
 
-**cc-bridge multi-stick**: the current daemon connects to the *first*
-device matching `CC_BRIDGE_DEVICE_PREFIX` (default `Claude-`). To bind
-to a specific stick, set the prefix to the full name:
-
-```bash
-launchctl setenv CC_BRIDGE_DEVICE_PREFIX Claude-F7C2
-launchctl kickstart -k gui/$(id -u)/com.cc-bridge
-```
-
-**Two daemons for two sticks**: clone the launchd plist with a different
-label and socket path; run two instances. Out of scope for v1; do it if
-you actually need both sticks live at once.
-
-**One stick = Claude Desktop, the other = Cursor**: that's the natural
-split for this fork's two-stick setup. See below.
+**One stick = Claude Code, the other = Cursor**: full sequence below.
 
 ## Cursor integration (now: `tools/cursor-bridge/`)
 
@@ -129,11 +150,13 @@ Claude Code (terminal)         Cursor (editor)
    │ hook.py / hook_permission.py │ cursor_hook.js
    ▼                              ▼
 /tmp/cc-bridge.sock         /tmp/cursor-bridge.sock
-   │                              │
-bridge.py (Claude-F7C2)     bridge.py (Claude-6DE2)
+   │ (scans Claude-)              │ (scans Cursor-)
+bridge.py                   bridge.py
    │                              │
 M5StickC #1                  M5StickC #2
-(clawd pack)                 (calico pack)
+firmware: m5stickc-plus2-claude   firmware: m5stickc-plus2-cursor
+advertises Claude-F7C2       advertises Cursor-6DE2
+clawd pack default           calico pack default
 ```
 
 Both daemons speak the same heartbeat schema (REFERENCE.md), so the
@@ -146,27 +169,38 @@ Cursor's hook event names into the Claude Code names that
 
 Assumes you already have stick #1 paired and cc-bridge running.
 
-1. **Flash this fork's firmware to stick #2.**
-   Stock upstream firmware uses an encrypted-only NUS that bleak fights
-   on macOS. This fork adds a debug-NUS service that cc-bridge /
-   cursor-bridge speak.
+1. **Flash the `-cursor` firmware variant to stick #2.**
+   This builds the same source as `m5stickc-plus2`, but with two
+   compile-time constants flipped: BLE advertises as `Cursor-XXXX`
+   instead of `Claude-XXXX`, and the default character is `calico`
+   instead of scanning LittleFS.
+
+   Upstream firmware uses an encrypted-only NUS that bleak fights on
+   macOS — this fork adds a debug-NUS service that cc-bridge /
+   cursor-bridge speak. Both -claude and -cursor envs include it.
    ```bash
-   pio run -e m5stickc-plus2 -t upload --upload-port /dev/cu.usbserial-XXXX
+   pio run -e m5stickc-plus2-cursor -t upload --upload-port /dev/cu.usbserial-XXXX
    ```
    If you previously paired stick #2 with Claude Desktop on the
    upstream firmware, **forget the device** in System Settings →
    Bluetooth and toggle Bluetooth off/on (see §4 above for the GATT
-   cache gotcha).
+   cache gotcha). The new BLE name (`Cursor-XXXX` instead of
+   `Claude-XXXX`) makes this gotcha extra likely on the first boot.
 
-2. **Flash a character pack.** `calico` ships in this fork:
+2. **Flash the calico character pack to LittleFS.**
+   The -cursor firmware compiles in `BUDDY_DEFAULT_CHAR="calico"`, but
+   that's only a name lookup — the actual GIFs still need to be
+   present on the stick's filesystem:
    ```bash
    python3 tools/flash_character.py characters/calico
    ```
-   Or stick with `clawd` and visually distinguish the two sticks some
-   other way (different button-press habit, sticker on the back).
+   If you skip this, firmware falls back to scanning `/characters/`
+   for whatever pack is installed (e.g. clawd left over from a prior
+   flash) — character is best-effort, not fatal.
 
 3. **Pair stick #2 with macOS.** System Settings → Bluetooth, enter the
-   6-digit passkey shown on the stick screen. One-time bond.
+   6-digit passkey shown on the stick screen. One-time bond. The stick
+   should appear as `Cursor-XXXX`.
 
 4. **Install cursor-bridge.**
    ```bash
@@ -174,24 +208,18 @@ Assumes you already have stick #1 paired and cc-bridge running.
    ```
    Reads (and backs up) `~/.cursor/hooks.json`, merges 11 hook entries
    that point at `cursor_hook.js`. Other consumers (vibe-island, ahakey,
-   omc, omr, clawd-on-desk) are left untouched.
+   omc, omr, clawd-on-desk) are left untouched. Daemon comes up
+   scanning for `Cursor-` by default — no MAC-suffix pinning needed
+   when each stick has its own brand prefix.
 
-5. **Pin both daemons** so they don't race for the same advertising
-   stick. Replace `XXXX` with the last 4 hex of each stick's MAC
-   (`system_profiler SPBluetoothDataType | grep Claude-` lists them):
-   ```bash
-   launchctl setenv CC_BRIDGE_DEVICE_PREFIX     Claude-F7C2
-   launchctl setenv CURSOR_BRIDGE_DEVICE_PREFIX Claude-6DE2
-   launchctl kickstart -k gui/$(id -u)/com.cc-bridge
-   launchctl kickstart -k gui/$(id -u)/com.cursor-bridge
-   ```
-
-6. **Verify.** In Cursor, fire any agent action.
+5. **Verify.** In Cursor, fire any agent action.
    ```bash
    tail -f ~/Library/Logs/cursor-bridge.log
    ```
    Within ~10s the second stick should switch from idle → "thinking…"
-   → "running: shell" → "ready" as you exercise the agent.
+   → "running: shell" → "ready" as you exercise the agent. cc-bridge
+   on stick #1 keeps working in parallel — the two sticks scan
+   different prefixes so they never compete for the same device.
 
 ### What v1 doesn't do
 
