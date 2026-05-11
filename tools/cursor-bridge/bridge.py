@@ -184,6 +184,22 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             state.running = max(0, state.running - 1)
             state.msg = "ready"
             changed = True
+        # afterAgentResponse (Cursor) attaches output_tokens + text. Accumulate
+        # tokens into state.tokens / state.tokens_today so the buddy's
+        # display advances; push the assistant reply head into entries so the
+        # transcript scroll has something more interesting than tool names.
+        ot = ev.get("output_tokens")
+        if isinstance(ot, int) and ot > 0:
+            state.tokens += ot
+            state.tokens_today += ot
+            changed = True
+        txt = ev.get("text") or ""
+        if txt:
+            # Single-line collapse — REFERENCE.md caps each entry at ~91
+            # chars; add_entry() truncates further. Strip leading whitespace
+            # so the indent doesn't waste display columns.
+            state.add_entry(f"buddy: {txt.replace(chr(10), ' ').strip()}")
+            changed = True
 
     elif name == "PreToolUse":
         tool = ev.get("tool_name") or "tool"
@@ -450,10 +466,12 @@ async def heartbeat_loop(state, ble, dirty):
             pass  # keepalive
         dirty.clear()
         payload = state.to_payload()
-        log.info("emit: running=%d waiting=%d prompt=%s msg=%s",
+        log.info("emit: running=%d waiting=%d tokens=%d/%d prompt=%s msg=%s entries[0]=%s",
                  payload.get("running", 0), payload.get("waiting", 0),
+                 payload.get("tokens", 0), payload.get("tokens_today", 0),
                  (payload.get("prompt", {}) or {}).get("id", "-"),
-                 payload.get("msg", "")[:40])
+                 payload.get("msg", "")[:40],
+                 (payload.get("entries", [""])[:1] or [""])[0][:50])
         await ble.write(payload)
 
 

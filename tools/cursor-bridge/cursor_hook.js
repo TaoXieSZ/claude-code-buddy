@@ -61,7 +61,17 @@ function translate(ev) {
             };
         }
 
-        case 'afterAgentResponse':
+        case 'afterAgentResponse': {
+            // afterAgentResponse carries token usage + the assistant reply
+            // text. Plumb both through so bridge.py can accumulate `tokens`
+            // and surface the latest reply snippet in `entries`.
+            const out = { ...base, hook_event_name: 'Stop' };
+            if (typeof ev.output_tokens === 'number') out.output_tokens = ev.output_tokens;
+            if (typeof ev.input_tokens  === 'number') out.input_tokens  = ev.input_tokens;
+            const txt = ev.text || ev.response || '';
+            if (txt) out.text = String(txt).slice(0, 200);
+            return out;
+        }
         case 'afterAgentThought':
         case 'stop':
             return { ...base, hook_event_name: 'Stop' };
@@ -161,6 +171,15 @@ function main() {
         ev = JSON.parse(raw);
     } catch (_) {
         process.exit(0);
+    }
+
+    if (process.env.CURSOR_HOOK_DEBUG === '1') {
+        try {
+            fs.appendFileSync(
+                '/tmp/cursor-hook-debug.jsonl',
+                JSON.stringify({ ts: Date.now(), ev }) + '\n'
+            );
+        } catch (_) {}
     }
 
     const translated = translate(ev);
