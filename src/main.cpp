@@ -77,6 +77,15 @@ bool     gifAvailable = false;
 bool     bugc2Present  = false;
 uint8_t  promptSelection = 0;  // 0 = approve, 1 = deny (only used when bugc2Present)
 
+// Mic PTT gesture: "tap A, then within 300ms press-and-hold A". Hold for
+// 250ms to start (sends mic:down → daemon relays F5 keydown to Typeless);
+// release to stop. Only armed when on the idle main screen (no menu, no
+// prompt) so it never fights the existing approve/cycle semantics.
+uint32_t lastBtnAReleaseMs    = 0;     // 0 = gesture window closed
+bool     micCandidate         = false; // second-press of gesture in progress
+uint32_t micCandidateStartMs  = 0;
+bool     micActive            = false; // recording (key held down)
+
 // ASCII species removed — clawd GIF is the only pet. Menu still calls this
 // (entry kept for layout); we just re-render the same character.
 static void nextPet() { characterInvalidate(); }
@@ -1144,6 +1153,31 @@ void loop() {
     wake();
   }
 
+  // Mic PTT gesture: second A press within 300ms of a short tap, only
+  // when nothing else has focus. Arms micCandidate; the per-tick check
+  // below escalates to micActive after 250ms of continuous hold.
+  if (M5.BtnA.wasPressed() && lastBtnAReleaseMs &&
+      (millis() - lastBtnAReleaseMs) < 300 &&
+      !(tama.promptId[0] && !responseSent) &&
+      !menuOpen && !settingsOpen && !resetOpen) {
+    micCandidate = true;
+    micCandidateStartMs = millis();
+    swallowBtnA = true;  // suppress the normal short-release / menu-open
+    lastBtnAReleaseMs = 0;
+  } else if (M5.BtnA.wasPressed()) {
+    // Any A press that isn't the gesture's second press closes the window.
+    lastBtnAReleaseMs = 0;
+  }
+
+  // Escalate candidate → active after holding the second press long enough.
+  if (micCandidate && !micActive && M5.BtnA.isPressed() &&
+      (millis() - micCandidateStartMs) > 250) {
+    micActive = true;
+    sendCmd("{\"cmd\":\"mic\",\"state\":\"down\"}");
+    beep(2400, 80);
+    characterInvalidate();
+  }
+
   // AXP power button (left side): short-press toggles screen off.
   // Long-press (6s) still powers off the device via AXP hardware.
   if (axpGetBtnPress() == 0x02) {
@@ -1195,7 +1229,23 @@ void loop() {
     Serial.println(menuOpen ? "menu open" : "menu close");
   }
   if (M5.BtnA.wasReleased()) {
-    if (!btnALong && !swallowBtnA) {
+    // Mic gesture has highest priority — drain state before normal release.
+    if (micActive) {
+      micActive = false;
+      micCandidate = false;
+      sendCmd("{\"cmd\":\"mic\",\"state\":\"up\"}");
+      beep(600, 60);
+      characterInvalidate();
+      btnALong = false;
+      swallowBtnA = false;
+    } else if (micCandidate) {
+      // Second press released before mic threshold (250ms) — discard
+      // both events. User did a tap-tap; cycle already fired on the
+      // first release, the second was meant for a hold that fizzled.
+      micCandidate = false;
+      btnALong = false;
+      swallowBtnA = false;
+    } else if (!btnALong && !swallowBtnA) {
       if (inPrompt && bugc2Present) {
         // No-B mode: tap cycles selection; commit happens on long-press.
         promptSelection ^= 1;
@@ -1223,6 +1273,9 @@ void loop() {
         beep(1800, 30);
         displayMode = (displayMode + 1) % DISP_COUNT;
         applyDisplayMode();
+        // Arm mic gesture window: a follow-up A press within 300ms held
+        // for 250ms enters dictation mode. Only armed from idle main.
+        lastBtnAReleaseMs = millis();
       }
     }
     btnALong = false;
@@ -1347,6 +1400,17 @@ void loop() {
     if (resetOpen) drawReset();
     else if (settingsOpen) drawSettings();
     else if (menuOpen) drawMenu();
+    if (micActive) {
+      // Top banner. Blink the red dot ~2 Hz so you can see it's live.
+      spr.fillRect(0, 0, W, 14, 0xC020);  // dark red
+      spr.setTextColor(0xFFFF, 0xC020);
+      spr.setTextSize(1);
+      bool blink = (millis() / 250) & 1;
+      spr.setCursor(4, 3);
+      spr.print(blink ? "\xA5 REC" : "  REC");
+      spr.setCursor(W - 56, 3);
+      spr.print("release=stop");
+    }
     spr.pushSprite(&M5.Display, 0, 0);
   }
 
