@@ -7,6 +7,12 @@
 #include "audio_ble.h"
 #include "bugc2.h"
 
+// Branding fallback — overridden by build flag in platformio.ini for the
+// -claude / -cursor envs. Used in user-visible strings.
+#ifndef BUDDY_BRAND_NAME
+#define BUDDY_BRAND_NAME "Claude"
+#endif
+
 struct TamaState {
   uint8_t  sessionsTotal;
   uint8_t  sessionsRunning;
@@ -210,7 +216,7 @@ inline void dataPoll(TamaState* out) {
   if (!out->connected) {
     out->sessionsTotal=0; out->sessionsRunning=0; out->sessionsWaiting=0;
     out->recentlyCompleted=false; out->lastUpdated=now;
-    strncpy(out->msg, "No Claude connected", sizeof(out->msg)-1);
+    strncpy(out->msg, "No " BUDDY_BRAND_NAME " connected", sizeof(out->msg)-1);
     out->msg[sizeof(out->msg)-1]=0;
   }
 }

@@ -20,6 +20,12 @@ M5Canvas spr;  // parent set lazily in setup() to avoid static-init order trap
 #ifndef BUDDY_BRAND_PREFIX
 #define BUDDY_BRAND_PREFIX "Claude-"
 #endif
+// BUDDY_BRAND_NAME is the same brand sans dash, used in user-visible info
+// screen text ("I watch your <Brand>", "No <Brand> connected"). Set per
+// build env in platformio.ini; defaults to Claude for the plain env.
+#ifndef BUDDY_BRAND_NAME
+#define BUDDY_BRAND_NAME "Claude"
+#endif
 static char btName[16];
 static void startBt() {
   uint8_t mac[6] = {0};
@@ -528,8 +534,13 @@ void drawInfo() {
   if (infoPage == 0) {
     _infoHeader(p, y, "ABOUT", infoPage);
     spr.setTextColor(p.textDim, p.bg);
+#ifdef BUDDY_VARIANT_CURSOR
+    ln("I watch your Cursor");
+    ln("IDE sessions.");
+#else
     ln("I watch your Claude");
     ln("desktop sessions.");
+#endif
     y += 6;
     ln("I sleep when nothing's");
     ln("happening, wake when");
@@ -642,11 +653,19 @@ void drawInfo() {
       spr.setTextColor(p.text, p.bg);
       ln("TO PAIR");
       spr.setTextColor(p.textDim, p.bg);
+#ifdef BUDDY_VARIANT_CURSOR
+      ln(" Install");
+      ln(" cursor-bridge");
+      ln(" then it");
+      y += 4;
+      ln(" auto-connects via BLE");
+#else
       ln(" Open Claude desktop");
       ln(" > Developer");
       ln(" > Hardware Buddy");
       y += 4;
       ln(" auto-connects via BLE");
+#endif
     }
 
   } else {
