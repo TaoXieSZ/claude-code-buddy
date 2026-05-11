@@ -110,7 +110,8 @@ class BuddyState:
     completed: bool = False  # set briefly after Stop, cleared on next emit
 
     # internal — not sent
-    _sessions: dict = field(default_factory=dict)  # session_id -> {"running": bool, ...}
+    # session_id -> {"running": bool, "last_seen": float (monotonic seconds)}
+    _sessions: dict = field(default_factory=dict)
 
     def to_payload(self) -> dict:
         p = {
@@ -147,11 +148,15 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
     # "session terminated". Don't decrement `total` there. And don't set
     # `completed`; that's reserved for level-ups in the upstream protocol
     # and would otherwise fire CELEBRATE on every turn end.
+    now = time.monotonic()
+
     if name == "SessionStart":
         if sid not in state._sessions:
-            state._sessions[sid] = {"running": False}
+            state._sessions[sid] = {"running": False, "last_seen": now}
             state.total += 1
             changed = True
+        else:
+            state._sessions[sid]["last_seen"] = now
         state.add_entry("session start")
 
     elif name == "SessionEnd":
@@ -165,11 +170,14 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         if sid in state._sessions and not state._sessions[sid].get("running"):
             state._sessions[sid]["running"] = True
             state.running += 1
-        # Even if we never saw a SessionStart, treat this as one.
+        # Cursor IDE doesn't fire SessionStart hooks (verified empirically),
+        # so the very first event we ever see for a session is usually
+        # UserPromptSubmit. Treat it as the session-start signal.
         elif sid not in state._sessions:
-            state._sessions[sid] = {"running": True}
+            state._sessions[sid] = {"running": True, "last_seen": now}
             state.total += 1
             state.running += 1
+        state._sessions[sid]["last_seen"] = now
         prompt = ev.get("prompt") or ev.get("user_prompt") or ""
         if prompt:
             state.add_entry(f"you: {prompt}")
@@ -179,11 +187,13 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
     elif name == "Stop":
         # Assistant done responding (this turn). Session still open.
         s = state._sessions.get(sid)
-        if s and s.get("running"):
-            s["running"] = False
-            state.running = max(0, state.running - 1)
-            state.msg = "ready"
-            changed = True
+        if s:
+            s["last_seen"] = now
+            if s.get("running"):
+                s["running"] = False
+                state.running = max(0, state.running - 1)
+                state.msg = "ready"
+                changed = True
         # afterAgentResponse (Cursor) attaches output_tokens + text. Accumulate
         # tokens into state.tokens / state.tokens_today so the buddy's
         # display advances; push the assistant reply head into entries so the
@@ -209,11 +219,23 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         hint = ti.get("command") or ti.get("description") or ti.get("file_path") or ""
         line = f"{tool} {hint}".strip()
         state.add_entry(line)
+        if sid in state._sessions:
+            state._sessions[sid]["last_seen"] = now
         changed = True
 
     elif name == "PostToolUse":
         tool = ev.get("tool_name") or "tool"
-        state.msg = f"done: {tool}"
+        if ev.get("failure"):
+            err = (ev.get("error") or "").strip()
+            state.msg = f"failed: {tool}"
+            # Push the failure into entries with a leading '!' marker so the
+            # transcript scroll on the stick visually distinguishes failed
+            # tool calls. Truncation is handled by add_entry().
+            state.add_entry(f"!fail {tool} {err}".strip())
+        else:
+            state.msg = f"done: {tool}"
+        if sid in state._sessions:
+            state._sessions[sid]["last_seen"] = now
         changed = True
 
     elif name in ("PermissionRequest", "Notification"):
@@ -491,6 +513,35 @@ async def reconnect_loop(ble):
             await asyncio.sleep(wait)
 
 
+# Sessions older than this with no events are reaped on the next tick.
+# Cursor IDE doesn't fire SessionEnd hooks (verified empirically), so without
+# this `state.total` and `state.running` would only ever grow; a Cursor
+# window that's been idle for an hour shouldn't keep counting against the
+# active-session badge on the stick.
+STALE_SESSION_SEC = 600  # 10 min
+
+
+async def reaper_loop(state, dirty):
+    """Periodically drop sessions with no recent activity, recompute counters."""
+    while True:
+        await asyncio.sleep(60)
+        now = time.monotonic()
+        stale = [
+            sid for sid, s in state._sessions.items()
+            if now - s.get("last_seen", now) > STALE_SESSION_SEC
+        ]
+        if not stale:
+            continue
+        for sid in stale:
+            log.info("reaping stale session %s (idle %ds)",
+                     sid[:8], int(now - state._sessions[sid].get("last_seen", now)))
+            state._sessions.pop(sid, None)
+        # Recompute counters from the post-reap session set so they can't drift.
+        state.total = len(state._sessions)
+        state.running = sum(1 for s in state._sessions.values() if s.get("running"))
+        dirty.set()
+
+
 async def main():
     # Clean up stale socket.
     try:
@@ -519,6 +570,7 @@ async def main():
         asyncio.create_task(server.serve_forever()),
         asyncio.create_task(heartbeat_loop(state, ble, dirty)),
         asyncio.create_task(reconnect_loop(ble)),
+        asyncio.create_task(reaper_loop(state, dirty)),
     ]
 
     await stop.wait()

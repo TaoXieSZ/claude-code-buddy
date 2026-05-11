@@ -138,18 +138,46 @@ function translate(ev) {
                 tool_name: ev.tool_name || ev.tool || 'tool',
             };
         case 'postToolUse':
-        case 'postToolUseFailure':
             return {
                 ...base,
                 hook_event_name: 'PostToolUse',
                 tool_name: ev.tool_name || ev.tool || 'tool',
             };
+        case 'postToolUseFailure':
+            // Same shape as postToolUse but flagged. bridge.py surfaces
+            // this as `msg = "failed: <tool>"` and pushes a `!failed:` line
+            // into entries so the user can see when something went sideways
+            // — otherwise a failed Edit / shell looks identical to a
+            // successful one on the stick.
+            return {
+                ...base,
+                hook_event_name: 'PostToolUse',
+                tool_name: ev.tool_name || ev.tool || 'tool',
+                failure: true,
+                error: String(ev.error || ev.message || ev.reason || '').slice(0, 120),
+            };
 
         case 'subagentStart':
+            // Multitask Mode fires subagents constantly. Surface them so
+            // the buddy reflects background workers in flight. We treat
+            // each subagent as a "subagent" tool start; bridge.py will
+            // count it toward `running` via the standard PreToolUse path.
+            return {
+                ...base,
+                hook_event_name: 'PreToolUse',
+                tool_name: `sub:${String(ev.subagent_type || ev.type || 'task').slice(0, 24)}`,
+                tool_input: {
+                    description: String(
+                        ev.description || ev.task || ev.prompt || '',
+                    ).slice(0, 120),
+                },
+            };
         case 'subagentStop':
-            // No clean mapping — emit as a Stop-ish noop so the buddy
-            // doesn't go stale, but don't mutate session counts.
-            return null;
+            return {
+                ...base,
+                hook_event_name: 'PostToolUse',
+                tool_name: `sub:${String(ev.subagent_type || ev.type || 'task').slice(0, 24)}`,
+            };
 
         default:
             return null;
