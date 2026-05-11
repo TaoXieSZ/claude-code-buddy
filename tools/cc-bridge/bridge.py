@@ -352,20 +352,82 @@ def _safe_set(fut: asyncio.Future, value):
         fut.set_result(value)
 
 
+# PTT key relay: stick sends {"cmd":"mic","state":"down|up"}; daemon
+# simulates a press/release of CC_BRIDGE_PTT_KEYCODE so any PTT dictation
+# app on the Mac (e.g. Typeless) picks it up.
+# Default: 61 = right Option (kVK_RightOption). For a modifier-only key
+# (54-63) we emit a kCGEventFlagsChanged event with the correct flag
+# mask; for normal keys we emit keyDown/keyUp.
+# Requires Accessibility permission for the daemon's Python interpreter.
+PTT_KEYCODE = int(os.environ.get("CC_BRIDGE_PTT_KEYCODE", "61"))  # right Option
+
+# kVK codes for modifier keys → CGEventFlagMask. Order matters here only
+# so PTT_KEYCODE matches one value.
+_MOD_FLAGS = {
+    54: 0x100000,  # right Cmd        → kCGEventFlagMaskCommand
+    55: 0x100000,  # left Cmd
+    56: 0x020000,  # left Shift       → kCGEventFlagMaskShift
+    58: 0x080000,  # left Option      → kCGEventFlagMaskAlternate
+    59: 0x040000,  # left Control     → kCGEventFlagMaskControl
+    60: 0x020000,  # right Shift
+    61: 0x080000,  # right Option
+    62: 0x040000,  # right Control
+    63: 0x800000,  # Fn / Function    → kCGEventFlagMaskSecondaryFn
+}
+
+
+def _send_key(down: bool):
+    try:
+        from Quartz import (
+            CGEventCreateKeyboardEvent,
+            CGEventSetType,
+            CGEventSetFlags,
+            CGEventPost,
+            kCGEventFlagsChanged,
+            kCGHIDEventTap,
+        )
+    except Exception as e:
+        log.warning("Quartz not available, mic relay disabled: %s", e)
+        return
+    ev = CGEventCreateKeyboardEvent(None, PTT_KEYCODE, down)
+    if ev is None:
+        return
+    if PTT_KEYCODE in _MOD_FLAGS:
+        # Modifier-only press: switch event type to FlagsChanged so the
+        # system treats it as a modifier transition, not a regular key.
+        CGEventSetType(ev, kCGEventFlagsChanged)
+        CGEventSetFlags(ev, _MOD_FLAGS[PTT_KEYCODE] if down else 0)
+    CGEventPost(kCGHIDEventTap, ev)
+
+
 def on_stick_line(line: str):
-    """Called from the BLE TX handler thread (sync). Resolve any pending
-    permission future when the stick sends back an ack."""
+    """Called from the BLE TX handler thread (sync). Routes stick → daemon
+    commands: permission acks (resolves PENDING futures), mic PTT relay."""
     try:
         obj = json.loads(line)
     except Exception:
         return
-    if obj.get("cmd") != "permission":
+    cmd = obj.get("cmd")
+
+    if cmd == "permission":
+        rid = obj.get("id")
+        decision = obj.get("decision", "ask")
+        fut = PENDING.get(rid)
+        if fut and not fut.done():
+            fut.get_loop().call_soon_threadsafe(_safe_set, fut, decision)
         return
-    rid = obj.get("id")
-    decision = obj.get("decision", "ask")
-    fut = PENDING.get(rid)
-    if fut and not fut.done():
-        fut.get_loop().call_soon_threadsafe(_safe_set, fut, decision)
+
+    if cmd == "mic":
+        # Typeless (and similar) treats the PTT hotkey as a toggle: one
+        # tap starts recording, another stops. So on each mic state
+        # transition we emit a full tap (down+up) rather than holding
+        # the key for the duration of the stick press.
+        state = (obj.get("state") or "").lower()
+        if state in ("down", "up"):
+            log.info("mic %s → tap key %d", state, PTT_KEYCODE)
+            _send_key(True)
+            _send_key(False)
+        return
 
 
 # ─── socket server + main loop ─────────────────────────────────────────

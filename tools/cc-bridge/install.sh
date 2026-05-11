@@ -81,8 +81,11 @@ if [[ ! -d "${VENV}" ]]; then
   echo "→ creating venv at ${VENV}"
   python3 -m venv "${VENV}"
 fi
-echo "→ installing bleak into venv"
-"${VENV}/bin/pip" install --quiet --upgrade pip bleak
+echo "→ installing bleak + pyobjc-framework-Quartz into venv"
+# Quartz: needed for the mic PTT relay. Stick sends {"cmd":"mic"…} and
+# daemon simulates an F5 keystroke (or CC_BRIDGE_PTT_KEYCODE) so Typeless
+# or any PTT dictation app picks it up.
+"${VENV}/bin/pip" install --quiet --upgrade pip bleak pyobjc-framework-Quartz
 
 # ─── 2. launchd plist ──────────────────────────────────────────────────
 echo "→ writing launchd plist to ${PLIST_DST}"
