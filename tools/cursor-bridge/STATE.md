@@ -89,7 +89,6 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
 | Per-tool "always allow" memory on stick | Daemon respects `always` decision but stick has no UI to issue it yet (only A=once, B=deny) | medium if approval prompts get noisy |
 | Model name display | Cursor doesn't include `model` in non-base hook payload (verified) | low — buddy has limited screen real estate |
 | Workspace name | `workspace_roots[]` arrives but isn't surfaced | low |
-| PTT mic key relay | cc-bridge has it; intentionally omitted from cursor-bridge | not planned |
 
 ## Verification
 

@@ -49,9 +49,11 @@ What's new in this fork (vs upstream `anthropics/claude-desktop-buddy`):
 - ASCII-buddy renderer (`src/buddies/*.cpp`) retired — GIF path is the
   only character renderer.
 
-Wire protocol unchanged; see [`REFERENCE.md`](REFERENCE.md). Heavy
-thanks to upstream for the protocol, BLE service, GIF runtime, and the
-seven-state persona engine.
+Wire protocol mostly unchanged (see [`REFERENCE.md`](REFERENCE.md)); one
+small addition: stick now also sends `{"cmd":"mic","state":"down|up"}` on
+PTT (press-to-talk) gesture transitions for dictation apps. Heavy thanks to
+upstream for the protocol, BLE service, GIF runtime, and the seven-state
+persona engine.
 
 <p align="center">
   <img src="docs/device-plus2-bugc2.jpg" alt="M5StickC Plus2 mounted on a BugC2 chassis, screen showing the clawd buddy with mood/fed/energy stats" width="500">
@@ -183,6 +185,8 @@ Common after wiping the stick or aggressive flash cycles.
 
 ## Controls
 
+**Standard mode** (no BugC2, or BugC2 attached but _not_ blocking BtnB):
+
 |                         | Normal               | Pet         | Info        | Approval    |
 | ----------------------- | -------------------- | ----------- | ----------- | ----------- |
 | **A** (front)           | next screen          | next screen | next screen | **approve** |
@@ -193,8 +197,30 @@ Common after wiping the stick or aggressive flash cycles.
 | **Shake**               | dizzy                |             |             | —           |
 | **Face-down**           | nap (energy refills) |             |             |             |
 
+**BugC2 no-B mode** (BugC2 chassis mounted, physically covers BtnB):
+
+Since the BugC2 base covers BtnB, the stick auto-detects this at boot and
+switches button semantics so you can still drive it with A alone:
+
+|                         | Normal / Menu       | Pet / Info  | Approval    |
+| ----------------------- | ------------------- | ----------- | ----------- |
+| **A** (front)           | cycle selection     | cycle pages | cycle approve↔deny |
+| **Hold A**              | confirm / open menu | confirm     | confirm selection |
+
+**PTT dictation gesture** (all modes):
+
+Tap A once, then within 300ms press-and-hold A for ≥250ms. While held, a
+blinking red `REC` banner shows on the top of the screen. Release to stop.
+The daemon translates this to a keystroke (default: right Option) that
+triggers your dictation app (e.g., Typeless). Only active from the idle main
+screen (no menus, no prompts).
+
+---
+
 The screen auto-powers-off after 30s of no interaction (kept on while an
-approval prompt is up). Any button press wakes it.
+approval prompt is up). After 15s of no button press / session activity, the
+stick visibly nods off into idle sleep (P_SLEEP state) before the 30s
+auto-off triggers. Any button press wakes it.
 
 ## GIF character
 
@@ -363,16 +389,17 @@ Roadmap for this fork (PRs welcome):
       yes/no. Investigate IDE extension or CLI flag to forward the
       decision back so the stick's A/B buttons can approve like
       cc-bridge does.
-- [ ] **cc-bridge BLE stability** — bleak+CoreBluetooth on macOS keeps
-      dropping the encrypted NUS link mid-session, so the permission
-      echo (PreToolUse → stick A → allow) misses windows when the
-      reconnect lag exceeds the 10s hook timeout. Either pre-emptive
-      keepalive writes, or switching to an unencrypted "debug" service
-      separate from the encrypted NUS.
-- [ ] **Re-enable audio capture / BLE PTT** on Plus2. Currently disabled
-      in `setup()` because the I2S init burns ~68KB heap that the 16-bit
-      sprite needs. Need to either drop sprite to 8-bit palette or use
-      a smaller I2S buffer.
+- [x] ~~**cc-bridge BLE stability** — bleak+CoreBluetooth on macOS keeps
+      dropping the encrypted NUS link~~ — solved by adding an unencrypted
+      debug NUS service that both bridges use instead. No more encryption
+      flakiness mid-session.
+- [x] ~~**BLE PTT dictation gesture**~~ — shipped. Stick sends
+      `{"cmd":"mic","state":"down|up"}` on a tap-then-hold-A gesture
+      (300ms window, 250ms hold threshold). Daemon relays this to a
+      keystroke (`CC_BRIDGE_PTT_KEYCODE`, default right Option) so Typeless
+      or other PTT apps pick it up. Requires `pyobjc-framework-Quartz` dep
+      (added to both bridge install scripts). Stick's PDM mic dormant because
+      GPIO 0 collides with BugC2 I²C SDA.
 - [ ] **More GIF packs** from `clawd-on-desk` — calico, cloudling.
       `tools/prep_character.py` already supports per-state bbox so each
       pack lights up cleanly. Just write a manifest.

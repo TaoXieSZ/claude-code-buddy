@@ -105,6 +105,20 @@ When `prompt` is present, your device can return a response. Send one of:
 The `id` must match `prompt.id` exactly. The desktop forwards this to the
 session manager: `"once"` approves the tool call, `"deny"` rejects it.
 
+## Mic PTT relay
+
+Your device can also emit:
+
+```json
+{"cmd":"mic","state":"down"}
+{"cmd":"mic","state":"up"}
+```
+
+The daemon (cc-bridge or cursor-bridge) translates these into keystroke
+events to trigger dictation apps. `down` = key press, `up` = key release.
+Use case: a stick-mounted gesture (e.g., tap-then-hold button) that toggles
+PTT recording in Typeless or similar. See the README for gesture details.
+
 ## One-shot on connect
 
 Time sync (epoch seconds + timezone offset in seconds):

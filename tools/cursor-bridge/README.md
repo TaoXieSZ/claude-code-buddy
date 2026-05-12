@@ -12,11 +12,15 @@ run **both** bridges on the same Mac, each pinned to its own stick.
   `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`,
   `afterShellExecution`, `afterMCPExecution`, `afterFileEdit`,
   `afterAgentResponse`, `stop`, `sessionEnd`).
-- Translates them into the Claude Code hook schema that
-  `bridge.py:apply_event()` already understands. (Translation table is in
+- Translates them into the Claude Code hook schema that the shared
+  `buddy_core.run()` already understands. (Translation table is in
   `cursor_hook.js`.)
 - Forwards over a Unix socket (`/tmp/cursor-bridge.sock`) to a long-running
   launchd daemon that owns the BLE link to the stick.
+- **Shared core**: `tools/buddy_core/core.py` contains BLE writer, socket
+  server, heartbeat loop, reconnect watchdog, and both mic + permission
+  relaying. cursor-bridge provides only the `apply_event` function specific
+  to Cursor hook semantics.
 
 ## Install
 
@@ -82,11 +86,16 @@ session signal — prompt submit, tool start/end (incl. failures),
 subagent spawn, assistant turn end + token usage — feeds the buddy.
 Stale sessions get reaped after 10 min idle so counters don't drift.
 
+## Mic PTT gesture
+
+The stick sends `{"cmd":"mic","state":"down|up"}` on the PTT gesture
+(tap A, then hold A ≥250ms). The daemon relays to a keystroke
+(`CURSOR_BRIDGE_PTT_KEYCODE`, default right Option) so Typeless or other
+dictation apps pick it up. Same as cc-bridge. Requires
+`pyobjc-framework-Quartz`.
+
 ## What's not in v1
 
-- **Permission echo** — pressing A/B on the stick to allow/deny an agent
-  tool call. Wire is plumbed in `bridge.py` but Cursor doesn't yet
-  surface a clean pre-tool-gate hook event we can intercept.
 - **Fancy MCP state mapping** — `beforeMCPExecution` is surfaced as
   `tool_name="mcp:<method>"` and `afterMCPExecution` collapses back to
   plain `mcp`. Good enough for "running: mcp:..." display but loses

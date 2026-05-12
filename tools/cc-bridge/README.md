@@ -116,6 +116,11 @@ kickstart -k gui/$(id -u)/com.cc-bridge`):
 | `UserPromptSubmit` | push `you: <prompt>` to entries, msg=thinking… |
 | `PostCompact` | push "compacted" to entries |
 
+The stick also sends back `{"cmd":"mic","state":"down|up"}` when the user
+taps A then holds A for ≥250ms. The daemon simulates a keystroke
+(`CC_BRIDGE_PTT_KEYCODE`, default right Option) to trigger PTT dictation
+apps. See README § Controls for gesture details.
+
 State emits to the stick on every change + every 10s as keepalive.
 
 ## Limitations
@@ -132,14 +137,24 @@ State emits to the stick on every change + every 10s as keepalive.
 
 ## Architecture notes
 
-`bridge.py` is structured around three asyncio tasks:
+`bridge.py` is now a thin adapter (~30 LoC) that calls `buddy_core.run()`
+with an `apply_event` function and config. All shared logic — BLE writer,
+socket server, heartbeat loop, reconnect watchdog, mic/permission relaying —
+lives in `tools/buddy_core/core.py` (~300 LoC, zero duplication with
+cursor-bridge).
 
-1. **Unix socket server** — accepts hook events, calls `apply_event` to
+Core tasks inside `buddy_core.run()`:
+
+1. **Unix socket server** — accepts hook events, calls your `apply_event` to
    mutate `BuddyState`, signals dirty.
 2. **Heartbeat loop** — emits a fresh JSON payload to the stick on dirty
-   OR on a 10s keepalive timeout, whichever fires first.
+   OR on keepalive timeout, whichever fires first.
 3. **Reconnect watchdog** — keeps the BLE connection alive with capped
    backoff (2/4/8/16/30s).
+
+cc-bridge config:
+- `keepalive_s=10` — 10s heartbeat interval
+- `rtc_sync_on_connect=False` — Claude Desktop sends time via the main app
 
 The hook script is intentionally bare-bones (~30 LoC). It's a shim that
 forwards stdin to the daemon and exits in <100ms so Claude Code is never

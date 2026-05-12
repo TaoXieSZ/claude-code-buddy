@@ -228,14 +228,37 @@ Assumes you already have stick #1 paired and cc-bridge running.
    on stick #1 keeps working in parallel — the two sticks scan
    different prefixes so they never compete for the same device.
 
-### What v1 doesn't do
+### BugC2 no-B mode
 
-- **Stick approval gating.** cc-bridge has `hook_permission.py` that
-  blocks Claude Code's PreToolUse and waits for an A/B button press.
-  Cursor's permission API has a different shape (and may run inside
-  the editor process rather than via shell hook); deferred to v2.
-- **Per-tool granularity for MCP calls.** All MCP invocations show up
-  as `mcp:<method>` rather than the full upstream tool name.
+If the BugC2 chassis is mounted on the stick (physically covering BtnB),
+the firmware auto-detects this at boot and switches button semantics:
+
+- **Idle/menu/info**: A taps cycle through options, A long-press confirms.
+- **Approval prompt**: A taps cycle approve↔deny, A long-press confirms selection.
+- **Approval responses** (both cc-bridge and cursor-bridge): when stuck in a
+  permission prompt waiting for your decision, the stick shows the current
+  selection (approve/deny highlighted). Press A to toggle, hold A to send
+  your choice back to the IDE/CLI.
+
+In standard mode (no BugC2 or BugC2 not covering BtnB), both A and B work as
+before.
+
+### PTT dictation gesture (both bridges)
+
+A new PTT gesture for dictation apps:
+
+1. Tap button A once (short press, then release).
+2. Within 300ms, press-and-hold A again for ≥250ms.
+3. While held, a red `REC` banner blinks on the screen. Release to stop.
+
+The stick sends `{"cmd":"mic","state":"down|up"}` to the daemon, which
+relays it as a keystroke (default: right Option) to trigger Typeless or
+other PTT dictation apps. You'll hear audio from your Mac's built-in mic,
+not the stick. The gesture only works from the idle main screen (no menus,
+no prompts).
+
+**Config**: Set `CC_BRIDGE_PTT_KEYCODE` or `CURSOR_BRIDGE_PTT_KEYCODE` env
+vars to override the keystroke (default 61 = right Option, kVK_RightOption).
 
 ## Useful one-liners
 
