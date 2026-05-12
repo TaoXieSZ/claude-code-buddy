@@ -97,6 +97,10 @@ bool     micActive            = false; // recording (key held down)
 static void nextPet() { characterInvalidate(); }
 uint32_t wakeTransitionUntil = 0;
 const uint32_t SCREEN_OFF_MS = 30000;
+// Idle for this long with no activity → fall asleep (show sleep.gif).
+// Tuned shorter than SCREEN_OFF_MS so you actually see clawd nod off
+// before the screen blanks.
+const uint32_t IDLE_SLEEP_MS = 15000;
 
 bool     napping = false;
 uint32_t napStartMs = 0;
@@ -935,7 +939,11 @@ void drawPet() {
 void drawHUD() {
   if (tama.promptId[0]) { drawApproval(); return; }
   const Palette& p = characterPalette();
-  const int SHOW = 3, LH = 8, WIDTH = 21;
+  // Screen is 135×240 portrait. Bottom HUD owns SHOW*LH+4 px; the rest
+  // is character. SHOW=8 gives 68px out of 240, character keeps 72%
+  // (172px), which still comfortably fits the 80px clawd sprite.
+  // WIDTH 22: 22 chars × 6px + 2px left margin = 134px, 1px to spare.
+  const int SHOW = 8, LH = 8, WIDTH = 22;
   const int AREA = SHOW * LH + 4;
   spr.fillRect(0, H - AREA, W, AREA, p.bg);
   spr.setTextSize(1);
@@ -970,7 +978,7 @@ void drawHUD() {
     uint8_t row = start + i;
     bool fresh = (srcOf[row] == newest) && (msgScroll == 0);
     spr.setTextColor(fresh ? p.text : p.textDim, p.bg);
-    spr.setCursor(4, H - AREA + 2 + i * LH);
+    spr.setCursor(2, H - AREA + 2 + i * LH);
     spr.print(disp[row]);
   }
   if (msgScroll > 0) {
@@ -1398,6 +1406,15 @@ void loop() {
     else if (friday && h >= 15)      activeState = (now/4000 % 3 == 0) ? P_CELEBRATE : P_IDLE;
     else if (h >= 22 || h == 0)      activeState = (now/7000 % 3 == 0) ? P_DIZZY : P_SLEEP;
     else                             activeState = (now/10000 % 5 == 0) ? P_SLEEP : P_IDLE;
+  }
+
+  // Idle timeout: regardless of whether activeState came from baseState
+  // (non-clocking) or the clocking-mode RTC heuristics, after
+  // IDLE_SLEEP_MS of no real activity, lock to SLEEP so it visibly nods
+  // off. Next wake() (button, prompt, session activity) resets the
+  // counter and the regular state derivation takes over again.
+  if (activeState == P_IDLE && (millis() - lastInteractMs) > IDLE_SLEEP_MS) {
+    activeState = P_SLEEP;
   }
 
   static uint32_t lastPasskey = 0;

@@ -139,6 +139,16 @@ static void _applyJson(const char* line, TamaState* out) {
   if (m) { strncpy(out->msg, m, sizeof(out->msg)-1); out->msg[sizeof(out->msg)-1]=0; }
   JsonArray la = doc["entries"];
   if (!la.isNull()) {
+    // Stash old newest-entry so we can detect a real change. The
+    // previous logic compared lines[n-1] to out->msg, but msg is the
+    // *current status* string (e.g. "thinking…", "running: Bash") that
+    // updates every emit independent of the entries list, so lineGen
+    // bumped on every heartbeat and wake() kept the stick from ever
+    // hitting the idle-sleep timeout.
+    char oldTop[92] = {0};
+    strncpy(oldTop, out->lines[0], sizeof(oldTop) - 1);
+    uint8_t oldN = out->nLines;
+
     uint8_t n = 0;
     for (JsonVariant v : la) {
       if (n >= 8) break;
@@ -146,7 +156,7 @@ static void _applyJson(const char* line, TamaState* out) {
       strncpy(out->lines[n], s ? s : "", 91); out->lines[n][91]=0;
       n++;
     }
-    if (n != out->nLines || (n > 0 && strcmp(out->lines[n-1], out->msg) != 0)) {
+    if (n != oldN || (n > 0 && strcmp(out->lines[0], oldTop) != 0)) {
       out->lineGen++;
     }
     out->nLines = n;
