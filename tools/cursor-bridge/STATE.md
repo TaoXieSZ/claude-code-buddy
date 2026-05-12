@@ -16,7 +16,7 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
 | `entries` | str[≤8] | Recent transcript lines (newest first, ≤91 chars each) | UserPromptSubmit / PreToolUse / Stop / failures |
 | `tokens` | uint32 | Tokens used in the last assistant turn | afterAgentResponse.output_tokens |
 | `tokens_today` | uint32 | Cumulative tokens since daemon start | afterAgentResponse.output_tokens accum |
-| `prompt` | obj | `{id, tool, hint}` for pending stick-button approval | wait_permission RPC (not yet wired for Cursor) |
+| `prompt` | obj | `{id, tool, hint}` for pending stick-button approval | wait_permission RPC ✅ wired for `beforeShellExecution` + `beforeMCPExecution` |
 | `completed` | bool | One-shot CELEBRATE trigger | reserved (level-up only) |
 
 ## Cursor hook event coverage
@@ -28,9 +28,9 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
 | `beforeSubmitPrompt` | `UserPromptSubmit` | `running++`, msg="thinking…", entries: "you: …" | ✅ verified live |
 | `afterAgentResponse` | `Stop` | `running--`, tokens accum, entries: "buddy: …" | ✅ verified live |
 | `afterAgentThought` / `stop` | `Stop` | `running--`, msg="ready" | ✅ verified live |
-| `beforeShellExecution` | `PreToolUse(shell)` | msg="running: shell", entries: command | ✅ verified live |
+| `beforeShellExecution` | `wait_permission` RPC (sync) | msg="approve: shell", prompt={shell, command} → A=allow / B=deny / 8s=ask | ✅ permission echo |
 | `afterShellExecution` | `PostToolUse(shell)` | msg="done: shell" | ✅ verified live |
-| `beforeMCPExecution` | `PreToolUse(mcp:…)` | msg="running: mcp:…" | covered |
+| `beforeMCPExecution` | `wait_permission` RPC (sync) | msg="approve: mcp:…", prompt={mcp:tool, hint} → A/B/timeout | ✅ permission echo |
 | `afterMCPExecution` | `PostToolUse(mcp)` | msg="done: mcp" | covered |
 | `beforeReadFile` | `PreToolUse(read)` | msg="running: read", entries: file_path | covered |
 | `afterFileEdit` | `PostToolUse(edit)` | msg="done: edit" | covered |
@@ -52,17 +52,43 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
   sent immediately after `start_notify` succeeds, every reconnect. The
   cursor stick has no Claude Desktop in the loop, so without this its
   clock display sits at 2000-01-01 (or whatever was on the coin cell).
-- **Permission echo plumbing** — wire is there (`wait_permission` RPC,
-  `PENDING` futures, `on_stick_line` ack handler) but Cursor's permission
-  protocol is not yet hooked into `cursor_hook.js`. Out of scope for v1.
+- **Permission echo** — `cursor_hook_permission.js` is wired into
+  `beforeShellExecution` and `beforeMCPExecution` only. It speaks the
+  same `wait_permission` RPC as cc-bridge's `hook_permission.py`, so
+  the daemon-side machinery (`PENDING` futures, `on_stick_line` ack
+  handler) is shared. Cursor's response shape differs:
+
+  ```json
+  // What cursor_hook_permission.js writes to stdout
+  {
+    "permission": "allow" | "deny" | "ask",
+    "user_message": "buddy stick: <decision>",
+    "agent_message": "buddy stick: <decision>"
+  }
+  ```
+
+  Stick decision → Cursor permission mapping:
+  - `once` / `always` → `allow`
+  - `deny` → `deny`
+  - `ask` (timeout, daemon down, hook disabled) → no JSON body, exit 0
+    so Cursor falls through to its own permission flow. Fail-open by
+    default — set `failClosed: true` in `~/.cursor/hooks.json` per-script
+    if you'd rather block on hook failures.
+
+  Disable wholesale with `launchctl setenv CURSOR_BRIDGE_PERMISSION_ECHO 0`.
+  Per-event matchers (e.g. only gate `curl|wget|rm -rf` shell commands)
+  are configured in `~/.cursor/hooks.json` directly using Cursor's
+  built-in `matcher` field — no daemon change needed.
 
 ## Known not-yet-wired
 
 | Item | Why | Priority if needed later |
 |---|---|---|
-| Stick-button permission approve for Cursor tool gates | Cursor's permission hook payload differs from Claude Code's `hookSpecificOutput`; needs translation | medium — only matters if Cursor ever exposes pre-tool gates we want stick to gate |
-| Model name display | Cursor doesn't include `model` in its hook payload (verified) | low — buddy has limited screen real estate already |
-| Workspace name | Cursor doesn't include `workspace` in its hook payload | low |
+| `beforeReadFile` permission gate | Cursor reads files constantly; gating each one would tank the UX. Set `failClosed: true` + matcher manually in `hooks.json` if you want it for sensitive paths only | low |
+| `subagentStart` / `preToolUse` gate | Would interrupt Multitask Mode workers and built-in tools. Skipped on purpose | low |
+| Per-tool "always allow" memory on stick | Daemon respects `always` decision but stick has no UI to issue it yet (only A=once, B=deny) | medium if approval prompts get noisy |
+| Model name display | Cursor doesn't include `model` in non-base hook payload (verified) | low — buddy has limited screen real estate |
+| Workspace name | `workspace_roots[]` arrives but isn't surfaced | low |
 | PTT mic key relay | cc-bridge has it; intentionally omitted from cursor-bridge | not planned |
 
 ## Verification

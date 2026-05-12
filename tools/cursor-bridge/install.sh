@@ -43,15 +43,12 @@ PLIST_LABEL="com.cursor-bridge"
 PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 HOOKS_JSON="${HOME}/.cursor/hooks.json"
 
-# All Cursor hook events we wire. v1 = fire-and-forget only; permission
-# echo (button-on-stick allow/deny) is intentionally not implemented yet
-# because Cursor's permission protocol differs from Claude Code's
-# hookSpecificOutput shape.
-HOOK_EVENTS=(
+# Fire-and-forget Cursor hook events → cursor_hook.js. These dispatch
+# state-update events to the daemon over the Unix socket and exit
+# immediately (~5ms per call) so they never slow Cursor down.
+HOOK_EVENTS_ASYNC=(
   sessionStart
   beforeSubmitPrompt
-  beforeShellExecution
-  beforeMCPExecution
   beforeReadFile
   afterShellExecution
   afterMCPExecution
@@ -59,6 +56,21 @@ HOOK_EVENTS=(
   afterAgentResponse
   stop
   sessionEnd
+)
+
+# Synchronous Cursor hook events → cursor_hook_permission.js. These BLOCK
+# Cursor on a `wait_permission` RPC to the daemon; the daemon surfaces
+# the prompt on the stick screen, waits for an A/B button press (or
+# CURSOR_BRIDGE_PERMISSION_TIMEOUT_S, default 8s), and the script writes
+# Cursor's `{permission:allow|deny|ask, ...}` JSON to stdout.
+#
+# Only `beforeShellExecution` + `beforeMCPExecution` are gated by default
+# — `beforeReadFile` is too noisy (Cursor reads files constantly) and
+# `preToolUse` / `subagentStart` would interrupt Multitask Mode workers.
+# Disable wholesale with: launchctl setenv CURSOR_BRIDGE_PERMISSION_ECHO 0
+HOOK_EVENTS_SYNC=(
+  beforeShellExecution
+  beforeMCPExecution
 )
 
 # ─── helpers ───────────────────────────────────────────────────────────
@@ -101,19 +113,23 @@ uninstall() {
     require_jq
     backup_hooks_json
     echo "→ stripping cursor-bridge hook entries from ${HOOKS_JSON}"
-    local hook_path="${HERE}/cursor_hook.js"
+    # Strip BOTH the async hook (cursor_hook.js) and the sync permission
+    # hook (cursor_hook_permission.js). Match by basename so a path with
+    # spaces or a moved checkout still gets cleaned up. Then drop empty
+    # event arrays.
     local tmp
+    for hook_basename in cursor_hook.js cursor_hook_permission.js; do
+      tmp="$(mktemp)"
+      jq --arg p "${hook_basename}" '
+        .hooks //= {}
+        | .hooks |= with_entries(
+            .value |= map(select((.command // "") | contains($p) | not))
+          )
+      ' "${HOOKS_JSON}" > "${tmp}" && mv "${tmp}" "${HOOKS_JSON}"
+    done
     tmp="$(mktemp)"
-    # Cursor hooks.json shape: { "hooks": { "<event>": [ {command, timeout?}, ... ] } }
-    # Remove any entry whose .command contains our cursor_hook.js path,
-    # then drop now-empty event arrays.
-    jq --arg p "${hook_path}" '
-      .hooks //= {}
-      | .hooks |= with_entries(
-          .value |= map(select((.command // "") | contains($p) | not))
-        )
-      | .hooks |= with_entries(select(.value | length > 0))
-    ' "${HOOKS_JSON}" > "${tmp}" && mv "${tmp}" "${HOOKS_JSON}"
+    jq '.hooks //= {} | .hooks |= with_entries(select(.value | length > 0))' \
+      "${HOOKS_JSON}" > "${tmp}" && mv "${tmp}" "${HOOKS_JSON}"
   fi
   echo "✓ uninstalled. venv at ${VENV} left in place — rm -rf manually if you want."
 }
@@ -160,53 +176,80 @@ echo "→ using node: ${NODE_BIN}"
 mkdir -p "$(dirname "${HOOKS_JSON}")"
 [[ -f "${HOOKS_JSON}" ]] || echo '{ "version": 1, "hooks": {} }' > "${HOOKS_JSON}"
 
-# Make sure cursor_hook.js is executable (we don't actually rely on its
-# shebang since we invoke node explicitly, but keep it tidy).
-chmod +x "${HERE}/cursor_hook.js" 2>/dev/null || true
+# Make sure both hook scripts are executable (we don't actually rely on
+# their shebang since we invoke node explicitly, but keep them tidy).
+chmod +x "${HERE}/cursor_hook.js"            2>/dev/null || true
+chmod +x "${HERE}/cursor_hook_permission.js" 2>/dev/null || true
 
 backup_hooks_json
 
-# Idempotent install: first STRIP any prior cursor_hook.js entries so we
-# re-converge to whatever the script wires below — even if the slot list
-# changed between runs. Other consumers (vibe-island, ahakey, omc, omr,
-# clawd-on-desk) are left intact because we only filter rows whose
-# .command contains OUR cursor_hook.js path.
-HOOK_PATH="${HERE}/cursor_hook.js"
+# Idempotent install: first STRIP any prior entries from BOTH hook
+# scripts so we re-converge cleanly even if the async/sync split or the
+# events list changed between runs. Match by basename, not full path,
+# so a moved checkout still gets cleaned up. Other consumers
+# (vibe-island, ahakey, omc, omr, clawd-on-desk) are untouched because
+# their commands don't contain "cursor_hook.js" or
+# "cursor_hook_permission.js".
 echo "→ stripping any prior cursor-bridge hook entries"
+for hook_basename in cursor_hook.js cursor_hook_permission.js; do
+  tmp="$(mktemp)"
+  jq --arg p "${hook_basename}" '
+    .hooks //= {}
+    | .hooks |= with_entries(
+        .value |= map(select((.command // "") | contains($p) | not))
+      )
+  ' "${HOOKS_JSON}" > "${tmp}" && mv "${tmp}" "${HOOKS_JSON}"
+done
+# Drop now-empty event arrays so hooks.json doesn't accumulate cruft.
 tmp="$(mktemp)"
-jq --arg p "${HOOK_PATH}" '
-  .hooks //= {}
-  | .hooks |= with_entries(
-      .value |= map(select((.command // "") | contains($p) | not))
-    )
-' "${HOOKS_JSON}" > "${tmp}" && mv "${tmp}" "${HOOKS_JSON}"
+jq '.hooks //= {} | .hooks |= with_entries(select(.value | length > 0))' \
+  "${HOOKS_JSON}" > "${tmp}" && mv "${tmp}" "${HOOKS_JSON}"
 
 # Ensure top-level "version" stays present (Cursor expects it).
 tmp="$(mktemp)"
 jq '.version //= 1' "${HOOKS_JSON}" > "${tmp}" && mv "${tmp}" "${HOOKS_JSON}"
 
-# Cursor hook command shape: { "command": "<node-path> <hook-script>" }
-# We single-quote-wrap each part so paths with spaces stay intact.
-HOOK_CMD="\"${NODE_BIN}\" \"${HOOK_PATH}\""
+# Cursor hook command shape: { "command": "<node-path> <hook-script>", "timeout": <sec>? }
+# Quote each path so spaces survive.
+HOOK_PATH_ASYNC="${HERE}/cursor_hook.js"
+HOOK_PATH_SYNC="${HERE}/cursor_hook_permission.js"
+HOOK_CMD_ASYNC="\"${NODE_BIN}\" \"${HOOK_PATH_ASYNC}\""
+HOOK_CMD_SYNC="\"${NODE_BIN}\" \"${HOOK_PATH_SYNC}\""
+
+# Sync gates need to outlive the daemon's wait_permission timeout
+# (CURSOR_BRIDGE_PERMISSION_TIMEOUT_S, default 8s) plus headroom for
+# socket I/O + JSON parse. 12s is safe; the script's own HOOK_CAP_MS
+# self-aborts a couple hundred ms earlier so Cursor never has to kill it.
+SYNC_HOOK_TIMEOUT_S=12
 
 add_hook() {
-  local ev="$1" cmd="$2"
+  local ev="$1" cmd="$2" timeout="$3"   # timeout in seconds; "" → omit
   local tmp
   tmp="$(mktemp)"
-  jq --arg ev "${ev}" --arg cmd "${cmd}" '
+  jq --arg ev "${ev}" --arg cmd "${cmd}" --arg timeout "${timeout}" '
     .hooks //= {}
     | .hooks[$ev] //= []
     | if (.hooks[$ev] | map(.command // "") | any(. == $cmd))
       then .
-      else .hooks[$ev] += [{"command": $cmd}]
+      else
+        .hooks[$ev] += [
+          if $timeout == ""
+          then {"command": $cmd}
+          else {"command": $cmd, "timeout": ($timeout | tonumber)}
+          end
+        ]
       end
   ' "${HOOKS_JSON}" > "${tmp}" && mv "${tmp}" "${HOOKS_JSON}"
 }
 
-for ev in "${HOOK_EVENTS[@]}"; do
-  add_hook "${ev}" "${HOOK_CMD}"
+for ev in "${HOOK_EVENTS_ASYNC[@]}"; do
+  add_hook "${ev}" "${HOOK_CMD_ASYNC}" ""
 done
-echo "→ wired hooks: ${HOOK_EVENTS[*]}"
+for ev in "${HOOK_EVENTS_SYNC[@]}"; do
+  add_hook "${ev}" "${HOOK_CMD_SYNC}" "${SYNC_HOOK_TIMEOUT_S}"
+done
+echo "→ wired async hooks: ${HOOK_EVENTS_ASYNC[*]}"
+echo "→ wired sync hooks:  ${HOOK_EVENTS_SYNC[*]} (timeout=${SYNC_HOOK_TIMEOUT_S}s)"
 
 # ─── done ──────────────────────────────────────────────────────────────
 cat <<EOF

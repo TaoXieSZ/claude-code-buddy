@@ -12,12 +12,14 @@
 // be temporarily offline.
 //
 // Wired up by tools/cursor-bridge/install.sh into ~/.cursor/hooks.json
-// under the relevant Cursor hook events (sessionStart,
-// beforeSubmitPrompt, beforeShellExecution, ...).
+// under the async Cursor hook events (sessionStart, beforeSubmitPrompt,
+// beforeReadFile, after*, stop, sessionEnd, ...).
 //
-// Permission echo (button-on-stick approval) is NOT implemented in v1.
-// Cursor's permission protocol differs from Claude Code's hookSpecificOutput
-// shape; we'll wire it up in a follow-up.
+// Permission echo (button-on-stick allow/deny) lives in a sibling file —
+// cursor_hook_permission.js — wired only to the gateable pre-events
+// (beforeShellExecution, beforeMCPExecution). This script stays
+// fire-and-forget for everything else, so Cursor is never blocked on
+// our side channel.
 
 'use strict';
 
