@@ -56,6 +56,9 @@ LOG_PATH = os.environ.get(
     "CURSOR_BRIDGE_LOG", str(pathlib.Path.home() / "Library/Logs/cursor-bridge.log")
 )
 PTT_KEYCODE = int(os.environ.get("CURSOR_BRIDGE_PTT_KEYCODE", "61"))  # right Option
+# "tap" = Typeless toggle (default); "hold" = Doubao 长按 / classic PTT;
+# "double_tap" = Doubao 免按. See tools/buddy_core/core.py:make_on_stick_line.
+PTT_MODE = os.environ.get("CURSOR_BRIDGE_PTT_MODE", "tap")
 
 # cursor-bridge talks to the firmware's debug service (unencrypted) just
 # like cc-bridge — the firmware mirrors notifies to both the encrypted
@@ -244,6 +247,7 @@ if __name__ == "__main__":
         device_prefix=DEVICE_PREFIX,
         apply_event=apply_event,
         ptt_keycode=PTT_KEYCODE,
+        ptt_mode=PTT_MODE,
         keepalive_s=2.0,
         rtc_sync_on_connect=True,   # no Claude Desktop in the loop for cursor
         extra_tasks=[reaper_loop],

@@ -1323,6 +1323,10 @@ void loop() {
         applyDisplayMode();
       } else {
         beep(1800, 30);
+        // Reset page indexes so re-entering INFO/PET starts at 1/N again
+        // (otherwise leaving on the last page leaves you "stuck" on the
+        // last page when you cycle back here in no-B mode).
+        if (bugc2Present) { infoPage = 0; petPage = 0; }
         displayMode = (displayMode + 1) % DISP_COUNT;
         applyDisplayMode();
         // Arm mic gesture window: a follow-up A press within 300ms held

@@ -144,13 +144,38 @@ def _send_key(keycode: int, down: bool) -> None:
     CGEventPost(kCGHIDEventTap, ev)
 
 
-def make_on_stick_line(ptt_keycode: int, log: logging.Logger) -> tuple[Callable[[str], None], dict]:
+def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
+                       log: logging.Logger) -> tuple[Callable[[str], None], dict]:
     """Factory: returns (on_stick_line callback, PENDING dict).
 
     Keeping PENDING inside the closure means each daemon gets an isolated
     future map; no cross-talk if two daemons share a process (unlikely but safe).
+
+    ptt_mode controls how mic-state transitions are translated into
+    keystrokes so different dictation apps can be driven by the same stick
+    gesture:
+
+    - "tap"        : single down+up on each mic state transition. Matches
+                     Typeless's toggle-style PTT hotkey ("one tap to
+                     start, one tap to stop").
+    - "hold"       : keydown on mic:down, keyup on mic:up. Classic
+                     press-to-talk; matches Doubao's 长按模式
+                     ("按住说话，松手结束").
+    - "double_tap" : double-tap on each transition. Matches Doubao's
+                     免按模式 ("双击开始说话，再次双击或按任意键均可结束").
     """
+    mode = (ptt_mode or "tap").lower()
+    if mode not in ("tap", "hold", "double_tap"):
+        log.warning("unknown PTT_MODE %r, falling back to 'tap'", ptt_mode)
+        mode = "tap"
     pending: dict[str, asyncio.Future] = {}
+
+    def _double_tap():
+        _send_key(ptt_keycode, True)
+        _send_key(ptt_keycode, False)
+        time.sleep(0.06)  # inter-tap gap — short enough not to feel laggy,
+        _send_key(ptt_keycode, True)  # long enough that the OS sees two
+        _send_key(ptt_keycode, False)  # discrete presses.
 
     def on_stick_line(line: str) -> None:
         """Called from BLE TX handler (sync). Routes stick→daemon commands:
@@ -170,12 +195,17 @@ def make_on_stick_line(ptt_keycode: int, log: logging.Logger) -> tuple[Callable[
             return
 
         if cmd == "mic":
-            # Typeless (and similar) treats the PTT hotkey as a toggle: one
-            # tap starts recording, another stops. So on each mic state
-            # transition we emit a full tap (down+up) rather than holding
-            # the key for the duration of the stick press.
             state = (obj.get("state") or "").lower()
-            if state in ("down", "up"):
+            if state not in ("down", "up"):
+                return
+            if mode == "hold":
+                log.info("mic %s → key %d %s", state, ptt_keycode,
+                         "down" if state == "down" else "up")
+                _send_key(ptt_keycode, state == "down")
+            elif mode == "double_tap":
+                log.info("mic %s → double-tap key %d", state, ptt_keycode)
+                _double_tap()
+            else:  # tap
                 log.info("mic %s → tap key %d", state, ptt_keycode)
                 _send_key(ptt_keycode, True)
                 _send_key(ptt_keycode, False)
@@ -398,22 +428,28 @@ async def heartbeat_loop(state: BuddyState, ble: BleWriter,
                          dirty: asyncio.Event, keepalive_s: float,
                          log: logging.Logger,
                          log_fmt: Callable[[dict], str] | None = None):
-    """Emits on dirty event OR every keepalive_s, whichever comes first."""
+    """Emits on dirty event OR every keepalive_s, whichever comes first.
+
+    Logs at INFO only on real state changes — keepalive ticks are DEBUG
+    so the log file doesn't grow 6 MB / few hours on an idle Mac."""
     while True:
         try:
+            keepalive = False
             try:
                 await asyncio.wait_for(dirty.wait(), timeout=keepalive_s)
             except asyncio.TimeoutError:
-                pass  # keepalive
+                keepalive = True
             dirty.clear()
             payload = state.to_payload()
+            level = logging.DEBUG if keepalive else logging.INFO
             if log_fmt:
-                log.info("emit: %s", log_fmt(payload))
+                log.log(level, "emit: %s", log_fmt(payload))
             else:
-                log.info("emit: running=%d waiting=%d prompt=%s msg=%s",
-                         payload.get("running", 0), payload.get("waiting", 0),
-                         (payload.get("prompt", {}) or {}).get("id", "-"),
-                         payload.get("msg", "")[:40])
+                log.log(level,
+                        "emit: running=%d waiting=%d prompt=%s msg=%s",
+                        payload.get("running", 0), payload.get("waiting", 0),
+                        (payload.get("prompt", {}) or {}).get("id", "-"),
+                        payload.get("msg", "")[:40])
             await ble.write(payload)
         except asyncio.CancelledError:
             raise
@@ -451,6 +487,7 @@ def run(
     device_prefix: str,
     apply_event: Callable,
     ptt_keycode: int,
+    ptt_mode: str = "tap",
     keepalive_s: float,
     rtc_sync_on_connect: bool = False,
     on_connect_cb: Callable | None = None,
@@ -467,6 +504,8 @@ def run(
     device_prefix:      BLE advertisement prefix to scan for.
     apply_event:        IDE-specific hook event → state mutation function.
     ptt_keycode:        macOS kVK code for the PTT key relay.
+    ptt_mode:           "tap" (Typeless toggle, default), "hold" (Doubao
+                        长按 / classic PTT), or "double_tap" (Doubao 免按).
     keepalive_s:        Heartbeat keepalive interval in seconds.
     rtc_sync_on_connect: Send {"time":[epoch,tz]} on BLE connect.
     on_connect_cb:      Optional sync callback called after BLE connects.
@@ -486,7 +525,7 @@ def run(
     )
     log = logging.getLogger(name)
 
-    on_stick_line, pending = make_on_stick_line(ptt_keycode, log)
+    on_stick_line, pending = make_on_stick_line(ptt_keycode, ptt_mode, log)
 
     ble = BleWriter(
         device_prefix=device_prefix,

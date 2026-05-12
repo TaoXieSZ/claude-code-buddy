@@ -43,6 +43,9 @@ LOG_PATH = os.environ.get(
     "CC_BRIDGE_LOG", str(pathlib.Path.home() / "Library/Logs/cc-bridge.log")
 )
 PTT_KEYCODE = int(os.environ.get("CC_BRIDGE_PTT_KEYCODE", "61"))  # right Option
+# "tap" = Typeless toggle (default); "hold" = Doubao 长按 / classic PTT;
+# "double_tap" = Doubao 免按. See tools/buddy_core/core.py:make_on_stick_line.
+PTT_MODE = os.environ.get("CC_BRIDGE_PTT_MODE", "tap")
 
 # cc-bridge talks to the firmware's debug service (unencrypted) instead
 # of the encrypted NUS that Claude Desktop uses. Same line-JSON protocol;
@@ -175,6 +178,7 @@ if __name__ == "__main__":
         device_prefix=DEVICE_PREFIX,
         apply_event=apply_event,
         ptt_keycode=PTT_KEYCODE,
+        ptt_mode=PTT_MODE,
         keepalive_s=10.0,
         rtc_sync_on_connect=False,  # Claude Desktop handles RTC for cc-bridge
     )
