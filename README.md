@@ -57,6 +57,49 @@ seven-state persona engine.
   <img src="docs/device-plus2-bugc2.jpg" alt="M5StickC Plus2 mounted on a BugC2 chassis, screen showing the clawd buddy with mood/fed/energy stats" width="500">
 </p>
 
+## Quick start
+
+Pick the producer you want and run that lane. Each is self-contained;
+you don't need any of the others.
+
+Prereqs (all lanes): macOS, an M5StickC Plus2, [PlatformIO Core][pio]
+(`brew install platformio` or `pipx install platformio`).
+
+[pio]: https://docs.platformio.org/en/latest/core/installation/methods/
+
+### Lane A: Claude Desktop (official GUI app)
+
+```bash
+pio run -e m5stickc-plus2-claude -t upload -t uploadfs
+```
+
+In Claude Desktop: **Help → Troubleshooting → Enable Developer Mode**,
+then **Developer → Open Hardware Buddy → Connect** and pick the stick.
+
+### Lane B: Claude Code (terminal CLI)
+
+```bash
+pio run -e m5stickc-plus2-claude -t upload -t uploadfs
+tools/cc-bridge/install.sh                          # needs jq + python3
+```
+
+Pair the stick once via macOS **System Settings → Bluetooth** (passkey
+shows on the stick screen). The launchd daemon connects within ~10s.
+
+### Lane C: Cursor IDE
+
+```bash
+pio run -e m5stickc-plus2-cursor -t upload -t uploadfs
+tools/cursor-bridge/install.sh                      # needs jq + node + python3
+```
+
+Then pair the stick via macOS Bluetooth as in Lane B.
+
+Two sticks side by side: flash one with `-claude`, one with `-cursor`,
+run both bridges. They scan by name prefix (`Claude-` vs `Cursor-`) and
+don't fight for advertisements. See
+[`docs/onboarding-next-stick.md`](docs/onboarding-next-stick.md).
+
 ## Hardware
 
 This fork targets:
@@ -71,28 +114,72 @@ and skips silently if not present.
 
 ## Flashing
 
+Three PlatformIO envs — pick by which producer the stick will pair with:
+
+| Env | BLE name | Default char | Use with |
+|---|---|---|---|
+| `m5stickc-plus2-claude` | `Claude-XXXX` | `clawd` | Claude Desktop (Lane A) or cc-bridge (Lane B) |
+| `m5stickc-plus2-cursor` | `Cursor-XXXX` | `clawd` | cursor-bridge (Lane C) |
+| `m5stickc-plus2`        | `Claude-XXXX` | scans LittleFS for any pack | legacy/plain — no baked-in defaults |
+
+Flash firmware **and** the LittleFS character pack in one shot:
+
 ```bash
-pio run -e m5stickc-plus2 -t upload
+pio run -e m5stickc-plus2-claude -t upload -t uploadfs
 ```
+
+`-t upload` writes the firmware partition; `-t uploadfs` writes the
+LittleFS partition (the GIF character pack). Skipping `uploadfs` on a
+fresh stick boots to a no-character screen — easy to silently miss.
+The `Makefile` has `make flash-claude` / `make flash-cursor` shortcuts
+that always do both.
 
 If you're starting from a previously-flashed device, wipe first:
 
 ```bash
-pio run -e m5stickc-plus2 -t erase && pio run -e m5stickc-plus2 -t upload
+pio run -e m5stickc-plus2-claude -t erase \
+  && pio run -e m5stickc-plus2-claude -t upload -t uploadfs
 ```
 
 Or wipe from the device itself: **hold A → settings → reset → factory reset**.
 
+Two sticks attached at once? See
+[`docs/onboarding-next-stick.md`](docs/onboarding-next-stick.md) for
+pinning each env to a specific USB port via `upload_port` in
+`platformio.ini`.
+
 ## Pairing
 
-Same as upstream: enable **Help → Troubleshooting → Enable Developer Mode**,
-then **Developer → Open Hardware Buddy…** in Claude desktop, click
-**Connect**, pick the stick. macOS will prompt for Bluetooth permission once.
+The pairing flow depends on which producer you're using.
+
+### Claude Desktop (Lane A)
+
+Enable **Help → Troubleshooting → Enable Developer Mode**, then
+**Developer → Open Hardware Buddy…**, click **Connect**, pick the stick.
+macOS will prompt for Bluetooth permission once.
 
 <p align="center">
   <img src="docs/menu.png" alt="Developer → Open Hardware Buddy… menu item" width="420">
   <img src="docs/hardware-buddy-window.png" alt="Hardware Buddy window with Connect button and folder drop target" width="420">
 </p>
+
+### cc-bridge / cursor-bridge (Lanes B and C)
+
+The CLI / IDE bridges use macOS's native BLE bond, not Claude Desktop's
+in-app pairing. After running the install script, pair once via
+**System Settings → Bluetooth → "Other devices"** — pick `Claude-XXXX`
+or `Cursor-XXXX`, then enter the 6-digit passkey shown on the stick
+screen.
+
+After the bond is in place, the launchd daemon auto-connects within
+~10s every time the Mac wakes or the stick reboots. Daemon logs:
+
+- cc-bridge: `~/Library/Logs/cc-bridge.log`
+- cursor-bridge: `~/Library/Logs/cursor-bridge.log`
+
+If you get `Peer removed pairing information` errors, the macOS bond
+went stale — "Forget This Device" in Bluetooth settings and re-pair.
+Common after wiping the stick or aggressive flash cycles.
 
 ## Controls
 

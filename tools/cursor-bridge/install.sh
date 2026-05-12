@@ -214,11 +214,11 @@ cat <<EOF
 ✓ cursor-bridge installed.
 
 Next steps:
-  1. Flash stick #2 with the -cursor firmware variant:
-       pio run -e m5stickc-plus2-cursor -t upload \\
+  1. Flash stick #2 with the -cursor firmware variant (firmware + character pack):
+       pio run -e m5stickc-plus2-cursor -t upload -t uploadfs \\
               --upload-port /dev/cu.usbserial-XXXXXX
      This builds a binary that advertises as "Cursor-XXXX" (vs cc-bridge's
-     "Claude-XXXX") and ships with the calico character pack as default.
+     "Claude-XXXX") and ships with the clawd character pack as default.
   2. Pair the stick with macOS via System Settings → Bluetooth (enter the
      6-digit passkey shown on the stick screen). One-time bond per Mac.
   3. Watch the daemon log:

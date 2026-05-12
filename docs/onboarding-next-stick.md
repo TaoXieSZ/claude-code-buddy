@@ -31,9 +31,18 @@ pio run -e m5stickc-plus2-cursor -t upload --upload-port /dev/cu.usbserial-XXXXX
 pio run -e m5stickc-plus2        -t upload --upload-port /dev/cu.usbserial-XXXXXXX
 
 # LittleFS partition (GIF character pack):
-python3 tools/flash_character.py characters/clawd      # for -claude env
-python3 tools/flash_character.py characters/calico     # for -cursor env
+python3 tools/flash_character.py characters/clawd --env claude    # for -claude env
+python3 tools/flash_character.py characters/clawd --env cursor    # for -cursor env
+
+# Or, in one shot via the Makefile (firmware + LittleFS together):
+make flash-claude
+make flash-cursor
 ```
+
+`clawd` is the default for both `-claude` and `-cursor` envs. `calico`
+is also shipped in `characters/` but has a known green-background
+rendering bug on Plus-1.x boards with poses wider than 135 px — stick
+to `clawd` unless you're on Plus2 and accept the risk.
 
 The two flashes are independent. After firmware flash, LittleFS is
 preserved (whatever pack you had stays). After uploadfs, program is
@@ -109,7 +118,7 @@ different default character packs:
 | Stick | PlatformIO env | Advertises as | Default char pack | Bridge daemon |
 |---|---|---|---|---|
 | #1 (Claude Code) | `m5stickc-plus2-claude` | `Claude-XXXX` | `clawd` | cc-bridge |
-| #2 (Cursor) | `m5stickc-plus2-cursor` | `Cursor-XXXX` | `calico` | cursor-bridge |
+| #2 (Cursor) | `m5stickc-plus2-cursor` | `Cursor-XXXX` | `clawd` | cursor-bridge |
 
 The `m5stickc-plus2-claude` / `m5stickc-plus2-cursor` envs share source
 with the plain `m5stickc-plus2` env; they only differ in two
@@ -156,7 +165,7 @@ bridge.py                   bridge.py
 M5StickC #1                  M5StickC #2
 firmware: m5stickc-plus2-claude   firmware: m5stickc-plus2-cursor
 advertises Claude-F7C2       advertises Cursor-6DE2
-clawd pack default           calico pack default
+clawd pack default           clawd pack default
 ```
 
 Both daemons speak the same heartbeat schema (REFERENCE.md), so the
@@ -172,31 +181,29 @@ Assumes you already have stick #1 paired and cc-bridge running.
 1. **Flash the `-cursor` firmware variant to stick #2.**
    This builds the same source as `m5stickc-plus2`, but with two
    compile-time constants flipped: BLE advertises as `Cursor-XXXX`
-   instead of `Claude-XXXX`, and the default character is `calico`
-   instead of scanning LittleFS.
+   instead of `Claude-XXXX`, and the default character is pinned to
+   `clawd` instead of scanning LittleFS.
 
    Upstream firmware uses an encrypted-only NUS that bleak fights on
    macOS — this fork adds a debug-NUS service that cc-bridge /
    cursor-bridge speak. Both -claude and -cursor envs include it.
    ```bash
-   pio run -e m5stickc-plus2-cursor -t upload --upload-port /dev/cu.usbserial-XXXX
+   pio run -e m5stickc-plus2-cursor -t upload -t uploadfs \
+     --upload-port /dev/cu.usbserial-XXXX
    ```
+   The `-t uploadfs` is what actually writes the clawd character pack
+   onto LittleFS — skip it and you'll boot to a no-character screen.
+   `make flash-cursor` does both in one shot.
+
    If you previously paired stick #2 with Claude Desktop on the
    upstream firmware, **forget the device** in System Settings →
    Bluetooth and toggle Bluetooth off/on (see §4 above for the GATT
    cache gotcha). The new BLE name (`Cursor-XXXX` instead of
    `Claude-XXXX`) makes this gotcha extra likely on the first boot.
 
-2. **Flash the calico character pack to LittleFS.**
-   The -cursor firmware compiles in `BUDDY_DEFAULT_CHAR="calico"`, but
-   that's only a name lookup — the actual GIFs still need to be
-   present on the stick's filesystem:
-   ```bash
-   python3 tools/flash_character.py characters/calico
-   ```
-   If you skip this, firmware falls back to scanning `/characters/`
-   for whatever pack is installed (e.g. clawd left over from a prior
-   flash) — character is best-effort, not fatal.
+2. (Skipped — `-t uploadfs` in step 1 already wrote the clawd pack.
+   Only re-run `python3 tools/flash_character.py characters/<name>
+   --env cursor` if you want a different pack later.)
 
 3. **Pair stick #2 with macOS.** System Settings → Bluetooth, enter the
    6-digit passkey shown on the stick screen. One-time bond. The stick
