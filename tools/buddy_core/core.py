@@ -401,19 +401,29 @@ async def heartbeat_loop(state: BuddyState, ble: BleWriter,
     """Emits on dirty event OR every keepalive_s, whichever comes first."""
     while True:
         try:
-            await asyncio.wait_for(dirty.wait(), timeout=keepalive_s)
-        except asyncio.TimeoutError:
-            pass  # keepalive
-        dirty.clear()
-        payload = state.to_payload()
-        if log_fmt:
-            log.info("emit: %s", log_fmt(payload))
-        else:
-            log.info("emit: running=%d waiting=%d prompt=%s msg=%s",
-                     payload.get("running", 0), payload.get("waiting", 0),
-                     (payload.get("prompt", {}) or {}).get("id", "-"),
-                     payload.get("msg", "")[:40])
-        await ble.write(payload)
+            try:
+                await asyncio.wait_for(dirty.wait(), timeout=keepalive_s)
+            except asyncio.TimeoutError:
+                pass  # keepalive
+            dirty.clear()
+            payload = state.to_payload()
+            if log_fmt:
+                log.info("emit: %s", log_fmt(payload))
+            else:
+                log.info("emit: running=%d waiting=%d prompt=%s msg=%s",
+                         payload.get("running", 0), payload.get("waiting", 0),
+                         (payload.get("prompt", {}) or {}).get("id", "-"),
+                         payload.get("msg", "")[:40])
+            await ble.write(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Don't let one bad payload (encode error, transient BLE OSError,
+            # downstream task raising) kill the entire emit loop and leave the
+            # daemon silently un-heartbeating. Log once and continue; the next
+            # tick will retry.
+            log.exception("heartbeat tick failed (continuing): %s", e)
+            await asyncio.sleep(1)
 
 
 async def reconnect_loop(ble: BleWriter, log: logging.Logger):
