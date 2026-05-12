@@ -80,6 +80,33 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
   are configured in `~/.cursor/hooks.json` directly using Cursor's
   built-in `matcher` field — no daemon change needed.
 
+- **Client-side matcher** (`cursor_hook_permission.js`) — short-circuits
+  obvious read-only commands BEFORE the daemon socket is opened, so the
+  stick's approval queue only sees commands that actually need a human
+  decision. Applies to `beforeShellExecution` only (MCP tool surface is
+  too varied to safelist meaningfully). Default on; disable with
+  `launchctl setenv CURSOR_BRIDGE_PERMISSION_MATCHER 0`.
+
+  Auto-allow rules (must satisfy ALL):
+  1. Command head is in `SAFE_SHELL_COMMANDS` (read-only Unix tools:
+     ls, cat, head, tail, pwd, echo, wc, file, stat, which, date,
+     whoami, id, uname, jq, grep / egrep / rg / ag, diff / cmp / comm,
+     ...) — full list in the script.
+  2. **OR** command is `git <subcommand>` where subcommand is in
+     `SAFE_GIT_SUBCOMMANDS` (status, log, diff, show, blame, ls-files,
+     ls-tree, ls-remote, rev-parse, rev-list, describe).
+  3. No shell metacharacter that enables chaining / redirect /
+     substitution: `;`, `&`, `|`, `<`, `>`, `` ` ``, `$`, newline.
+     This is the hard wall — `cat foo | rm -rf /` is rejected by the
+     pipe alone, regardless of `cat` being safelisted.
+  4. No leading env-var assignment (`FOO=bar cmd`) — obscures audit.
+
+  On auto-allow, the hook writes
+  `{"permission":"allow","user_message":"buddy matcher: safelisted: <head>", ...}`
+  to stdout and exits 0; daemon never sees the request, stick never
+  prompts. Set `CURSOR_HOOK_DEBUG=1` to append every matcher decision
+  to `/tmp/cursor-hook-debug.jsonl` for auditing.
+
 ## Known not-yet-wired
 
 | Item | Why | Priority if needed later |
@@ -89,6 +116,21 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
 | Per-tool "always allow" memory on stick | Daemon respects `always` decision but stick has no UI to issue it yet (only A=once, B=deny) | medium if approval prompts get noisy |
 | Model name display | Cursor doesn't include `model` in non-base hook payload (verified) | low — buddy has limited screen real estate |
 | Workspace name | `workspace_roots[]` arrives but isn't surfaced | low |
+
+## Footguns
+
+- **Don't add `Serial.printf` to hot paths in the BtnA / BLE handler on
+  Plus 1.1**. Plus 1.1 runs the same firmware as Plus2 but with tighter
+  SRAM headroom (boot 190K → runtime ~13K free heap when the GIF buffers
+  are live). Adding `printf`-class diagnostics inside the main `loop()`
+  burned enough stack and transient heap to push bluedroid's
+  `gatt_allocate_tcb_by_bdaddr` → `fixed_queue_new` over the edge on the
+  next LE feature-read event — `xQueueCreate` returned NULL, the
+  partial-alloc cleanup called `osi_sem_free(NULL)`, and the firmware
+  asserted. Symptom looks like "mic gesture crashes the stick" but it's
+  the instrumentation, not the gesture. If you need to trace the BtnA
+  state machine, use `Serial.println` with a small fixed string and only
+  on actual edge transitions, not every loop tick.
 
 ## Verification
 

@@ -29,6 +29,15 @@
 //   stick "ask"    → no output (exit 0 with empty `{}`) → fail-open, Cursor
 //                    falls back to its default permission flow.
 //
+// Client-side matcher (CURSOR_BRIDGE_PERMISSION_MATCHER, default on):
+//   For `beforeShellExecution`, low-risk read-only commands (ls / cat /
+//   head / pwd / git status / etc.) auto-allow without bothering the
+//   stick OR the daemon — keeps the approval queue focused on commands
+//   that actually mutate state or have side effects. See SAFE_SHELL_*
+//   sets below for the exact safelist; any shell metacharacter (pipe,
+//   redirect, substitution, chain) hard-rejects the match so the command
+//   falls through to the stick.
+//
 // The hook MUST exit cleanly within `CURSOR_BRIDGE_PERMISSION_TIMEOUT_S +
 // headroom` even if the daemon is down — never block Cursor on a side
 // channel that may be temporarily offline.
@@ -41,11 +50,78 @@ const net  = require('net');
 const SOCKET_PATH = process.env.CURSOR_BRIDGE_SOCKET || '/tmp/cursor-bridge.sock';
 const TIMEOUT_S   = Number(process.env.CURSOR_BRIDGE_PERMISSION_TIMEOUT_S || 8);
 const ECHO_ENABLED = (process.env.CURSOR_BRIDGE_PERMISSION_ECHO || '1') !== '0';
+const MATCHER_ENABLED = (process.env.CURSOR_BRIDGE_PERMISSION_MATCHER || '1') !== '0';
 
 // Hard cap on the whole hook process. Daemon's wait_permission timeout +
 // socket round-trip + parse. Stays well under Cursor's per-script timeout
 // in hooks.json (12s) so the script always exits before Cursor kills it.
 const HOOK_CAP_MS = Math.round((TIMEOUT_S + 2) * 1000);
+
+// ─── client-side matcher ───────────────────────────────────────────────
+// Commands that read state without mutating anything visible from the
+// shell. Adding to this list trades stick-prompt fatigue for slightly
+// reduced visibility — only add commands that are unambiguously
+// read-only AND can't be turned into a write via a single flag.
+
+const SAFE_SHELL_COMMANDS = new Set([
+    // listing / pathing
+    'ls', 'll', 'la', 'pwd', 'realpath', 'readlink', 'basename', 'dirname',
+    // reading / inspecting files
+    'cat', 'bat', 'head', 'tail', 'wc', 'file', 'stat', 'od', 'xxd',
+    // searching (grep -r / rg are read-only by design; no in-place flag)
+    'grep', 'egrep', 'fgrep', 'rg', 'ag',
+    // diffing (read-only; no in-place flag exists)
+    'diff', 'cmp', 'comm',
+    // text echoing (printf with no -v shell-write side effect)
+    'echo', 'printf',
+    // identity / system info
+    'whoami', 'id', 'groups', 'tty', 'hostname', 'arch', 'uname', 'date',
+    // command lookup
+    'which', 'whereis', 'type', 'command',
+    // hashing
+    'cksum', 'md5', 'md5sum', 'sha1sum', 'sha256sum', 'shasum',
+    // structured parsers (no -i / in-place flag exists)
+    'jq', 'yq',
+    // no-op
+    'true', 'false', ':',
+]);
+
+// `git` is special: many subcommands are pure read, many others mutate.
+// Only safelist the read-only ones. Anything not in this set falls
+// through to the stick.
+const SAFE_GIT_SUBCOMMANDS = new Set([
+    'status', 'log', 'diff', 'show', 'blame',
+    'ls-files', 'ls-tree', 'ls-remote',
+    'rev-parse', 'rev-list', 'describe',
+]);
+
+// Reject anything with shell metacharacters that enable chaining,
+// redirect, or substitution. Even a safelisted `cat` can become unsafe
+// with `cat foo | xargs rm`.
+const SHELL_METACHAR_RE = /[;&|<>`$\n\r]|\$\(|\$\{/;
+
+// Reject leading env-var assignments (`FOO=bar cmd`). The assignment
+// itself is benign but obscures audit and is rarely seen in agent
+// output, so easier to gate.
+const LEADING_ENV_ASSIGN_RE = /^\s*[A-Za-z_][A-Za-z0-9_]*=/;
+
+function isLowRiskShell(command) {
+    if (!command || typeof command !== 'string') return null;
+    if (SHELL_METACHAR_RE.test(command)) return null;
+    if (LEADING_ENV_ASSIGN_RE.test(command)) return null;
+
+    const tokens = command.trim().split(/\s+/);
+    if (tokens.length === 0) return null;
+    const head = tokens[0];
+
+    if (SAFE_SHELL_COMMANDS.has(head)) {
+        return `safelisted: ${head}`;
+    }
+    if (head === 'git' && tokens.length >= 2 && SAFE_GIT_SUBCOMMANDS.has(tokens[1])) {
+        return `safelisted: git ${tokens[1]}`;
+    }
+    return null;
+}
 
 // ─── helpers ───────────────────────────────────────────────────────────
 
@@ -139,6 +215,27 @@ function main() {
 
     const desc = describe(ev);
     if (!desc) { emitNoop(); return; }
+
+    // Client-side matcher: short-circuit allow for low-risk shell reads
+    // before we even open the socket. Saves the round-trip AND keeps the
+    // stick's approval queue focused on commands the agent actually
+    // needs to think about.
+    if (MATCHER_ENABLED && ev.hook_event_name === 'beforeShellExecution') {
+        const tag = isLowRiskShell(ev.command);
+        if (tag) {
+            if (process.env.CURSOR_HOOK_DEBUG === '1') {
+                try {
+                    fs.appendFileSync(
+                        '/tmp/cursor-hook-debug.jsonl',
+                        JSON.stringify({ ts: Date.now(), matcher: tag,
+                                         cmd: String(ev.command).slice(0, 200) }) + '\n'
+                    );
+                } catch (_) {}
+            }
+            emitDecision('allow', `buddy matcher: ${tag}`);
+            return;
+        }
+    }
 
     const sid = String(ev.conversation_id || ev.session_id || 'anon').slice(0, 8);
     const rid = `cursor_${sid}_${Date.now()}`;
