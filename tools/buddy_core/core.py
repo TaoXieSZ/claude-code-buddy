@@ -1,0 +1,537 @@
+"""
+buddy_core/core.py — shared runtime extracted from cc-bridge and cursor-bridge.
+
+Shared surface:
+  BuddyState, BleWriter, permission-echo plumbing (_safe_set, PENDING),
+  PTT key relay (_send_key, _MOD_FLAGS), on_stick_line dispatcher factory,
+  socket protocol (handle_client, _handle_wait_permission),
+  heartbeat_loop, reconnect_loop, run() entrypoint.
+
+IDE-specific behaviour (apply_event, env config, extra_tasks) stays in each
+bridge and is injected via run().
+"""
+
+import asyncio
+import json
+import logging
+import os
+import signal
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+try:
+    from bleak import BleakClient, BleakScanner
+    from bleak.exc import BleakError
+except ImportError:
+    sys.exit(
+        "bleak not installed. Run:\n"
+        "  python3 -m pip install --user bleak\n"
+        "or use the install.sh which sets up a venv."
+    )
+
+# ─── BLE constants ─────────────────────────────────────────────────────
+NUS_SVC = "b0c2dbe6-cc01-4000-8000-00805f9b34fb"
+NUS_RX  = "b0c2dbe6-cc02-4000-8000-00805f9b34fb"
+NUS_TX  = "b0c2dbe6-cc03-4000-8000-00805f9b34fb"
+SCAN_TIMEOUT = 8.0
+RECONNECT_BACKOFF_SEC = (2, 4, 8, 16, 30)  # ramps then plateaus
+
+# ─── state model ───────────────────────────────────────────────────────
+@dataclass
+class BuddyState:
+    """Mirrors the heartbeat JSON shape from REFERENCE.md."""
+    total: int = 0
+    running: int = 0
+    waiting: int = 0
+    msg: str = ""
+    entries: list = field(default_factory=list)  # most recent first
+    tokens: int = 0
+    tokens_today: int = 0
+    prompt: dict | None = None
+    completed: bool = False  # set briefly after Stop, cleared on next emit
+
+    # internal — not sent
+    # session_id -> {"running": bool, ...}  (bridges may add "last_seen")
+    _sessions: dict = field(default_factory=dict)
+
+    def to_payload(self) -> dict:
+        p = {
+            "total": self.total,
+            "running": self.running,
+            "waiting": self.waiting,
+            "msg": self.msg,
+            "entries": self.entries[:8],
+            "tokens": self.tokens,
+            "tokens_today": self.tokens_today,
+        }
+        if self.completed:
+            p["completed"] = True
+            self.completed = False  # one-shot
+        if self.prompt is not None:
+            p["prompt"] = self.prompt
+        return p
+
+    def add_entry(self, line: str):
+        # Newest first, capped — matches REFERENCE.md "newest first".
+        self.entries.insert(0, line[:91])
+        del self.entries[8:]
+
+
+# ─── permission echo plumbing ──────────────────────────────────────────
+# Pending permission requests: rid -> Future awaiting stick decision.
+# Each run() invocation gets its own fresh dict via make_on_stick_line().
+def _safe_set(fut: asyncio.Future, value):
+    # macOS BLE sometimes redelivers the same notification, which would
+    # call set_result twice and raise InvalidStateError on the second
+    # call. The exception traceback was previously taking long enough on
+    # the event loop that the awaiting wait_for raced into a timeout
+    # (set_result ran but the awaiter never resumed). Idempotent set
+    # avoids both: no exception, no extra loop work.
+    if not fut.done():
+        fut.set_result(value)
+
+
+# ─── PTT key relay ─────────────────────────────────────────────────────
+# PTT key relay: stick sends {"cmd":"mic","state":"down|up"}; daemon
+# simulates a press/release of the configured keycode so any PTT dictation
+# app on the Mac (e.g. Typeless) picks it up.
+# Default: 61 = right Option (kVK_RightOption). For a modifier-only key
+# (54-63) we emit a kCGEventFlagsChanged event with the correct flag
+# mask; for normal keys we emit keyDown/keyUp.
+# Requires Accessibility permission for the daemon's Python interpreter.
+
+# kVK codes for modifier keys → CGEventFlagMask.
+_MOD_FLAGS = {
+    54: 0x100000,  # right Cmd        → kCGEventFlagMaskCommand
+    55: 0x100000,  # left Cmd
+    56: 0x020000,  # left Shift       → kCGEventFlagMaskShift
+    58: 0x080000,  # left Option      → kCGEventFlagMaskAlternate
+    59: 0x040000,  # left Control     → kCGEventFlagMaskControl
+    60: 0x020000,  # right Shift
+    61: 0x080000,  # right Option
+    62: 0x040000,  # right Control
+    63: 0x800000,  # Fn / Function    → kCGEventFlagMaskSecondaryFn
+}
+
+# Module-level logger; bridges get their own via logging.getLogger(name).
+_log = logging.getLogger("buddy_core")
+
+
+def _send_key(keycode: int, down: bool) -> None:
+    try:
+        from Quartz import (
+            CGEventCreateKeyboardEvent,
+            CGEventSetType,
+            CGEventSetFlags,
+            CGEventPost,
+            kCGEventFlagsChanged,
+            kCGHIDEventTap,
+        )
+    except Exception as e:
+        _log.warning("Quartz not available, mic relay disabled: %s", e)
+        return
+    ev = CGEventCreateKeyboardEvent(None, keycode, down)
+    if ev is None:
+        return
+    if keycode in _MOD_FLAGS:
+        # Modifier-only press: switch event type to FlagsChanged so the
+        # system treats it as a modifier transition, not a regular key.
+        CGEventSetType(ev, kCGEventFlagsChanged)
+        CGEventSetFlags(ev, _MOD_FLAGS[keycode] if down else 0)
+    CGEventPost(kCGHIDEventTap, ev)
+
+
+def make_on_stick_line(ptt_keycode: int, log: logging.Logger) -> tuple[Callable[[str], None], dict]:
+    """Factory: returns (on_stick_line callback, PENDING dict).
+
+    Keeping PENDING inside the closure means each daemon gets an isolated
+    future map; no cross-talk if two daemons share a process (unlikely but safe).
+    """
+    pending: dict[str, asyncio.Future] = {}
+
+    def on_stick_line(line: str) -> None:
+        """Called from BLE TX handler (sync). Routes stick→daemon commands:
+        permission acks (resolves PENDING futures) and mic PTT relay."""
+        try:
+            obj = json.loads(line)
+        except Exception:
+            return
+        cmd = obj.get("cmd")
+
+        if cmd == "permission":
+            rid = obj.get("id")
+            decision = obj.get("decision", "ask")
+            fut = pending.get(rid)
+            if fut and not fut.done():
+                fut.get_loop().call_soon_threadsafe(_safe_set, fut, decision)
+            return
+
+        if cmd == "mic":
+            # Typeless (and similar) treats the PTT hotkey as a toggle: one
+            # tap starts recording, another stops. So on each mic state
+            # transition we emit a full tap (down+up) rather than holding
+            # the key for the duration of the stick press.
+            state = (obj.get("state") or "").lower()
+            if state in ("down", "up"):
+                log.info("mic %s → tap key %d", state, ptt_keycode)
+                _send_key(ptt_keycode, True)
+                _send_key(ptt_keycode, False)
+            return
+
+    return on_stick_line, pending
+
+
+# ─── BLE writer ────────────────────────────────────────────────────────
+class BleWriter:
+    def __init__(self, device_prefix: str, on_tx_line=None,
+                 rtc_sync_on_connect: bool = False,
+                 log: logging.Logger | None = None):
+        self._device_prefix = device_prefix
+        self._rtc_sync_on_connect = rtc_sync_on_connect
+        self._log = log or _log
+        self.client: BleakClient | None = None
+        self.address: str | None = None
+        self._lock = asyncio.Lock()           # serializes write_gatt_char
+        self._connect_lock = asyncio.Lock()   # serializes ensure_connected
+        self._on_tx_line = on_tx_line
+        self._tx_buf = bytearray()
+        self._on_connect_cb: Callable | None = None  # called after successful connect
+
+    def _tx_handler(self, _char, data: bytearray):
+        # NUS TX is line-oriented JSON. Buffer until \n, then parse.
+        self._log.info("tx raw +%d: %r", len(data), bytes(data)[:120])
+        self._tx_buf.extend(data)
+        while b"\n" in self._tx_buf:
+            line, _, rest = bytes(self._tx_buf).partition(b"\n")
+            self._tx_buf = bytearray(rest)
+            line = line.strip()
+            if not line:
+                continue
+            if self._on_tx_line:
+                try:
+                    self._on_tx_line(line.decode("utf-8", errors="replace"))
+                except Exception as e:
+                    self._log.warning("tx handler: %s", e)
+
+    async def ensure_connected(self) -> bool:
+        # Lock the entire connect flow — both reconnect_loop and write()
+        # can call this concurrently, which used to spawn duplicate
+        # BleakClient instances and cripple the NUS TX subscription
+        # (the second client's start_notify would silently fight the
+        # first for the same characteristic).
+        async with self._connect_lock:
+            if self.client and self.client.is_connected:
+                return True
+            self._log.info("scanning for stick (prefix=%s)", self._device_prefix)
+            device = None
+            try:
+                devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
+            except BleakError as e:
+                self._log.warning("scan failed: %s", e)
+                return False
+            for d in devices:
+                if d.name and d.name.startswith(self._device_prefix):
+                    device = d
+                    break
+            if not device:
+                self._log.warning("no %s* device in scan", self._device_prefix)
+                return False
+            self._log.info("connecting to %s (%s)", device.name, device.address)
+            self.address = device.address
+            self.client = BleakClient(device)
+            try:
+                await self.client.connect()
+            except BleakError as e:
+                self._log.warning("connect failed: %s", e)
+                self.client = None
+                return False
+            # Subscribe to TX so we can receive permission acks the stick
+            # sends when user presses A (decision=once) or B (decision=deny).
+            try:
+                await self.client.start_notify(NUS_TX, self._tx_handler)
+                self._log.info("subscribed to NUS TX")
+            except BleakError as e:
+                self._log.warning("start_notify failed (permission echo disabled): %s", e)
+            # Optional one-shot RTC sync on connect.
+            # cursor-bridge enables this because there's no Claude Desktop
+            # in the loop to send the time frame. cc-bridge leaves it off
+            # because Claude Desktop already handles it.
+            if self._rtc_sync_on_connect:
+                try:
+                    now = time.time()
+                    tz_offset = -time.timezone if time.daylight == 0 else -time.altzone
+                    rtc_line = (json.dumps({"time": [int(now), int(tz_offset)]}) + "\n").encode()
+                    await self.client.write_gatt_char(NUS_RX, rtc_line, response=False)
+                    self._log.info("rtc sync sent: epoch=%d tz_offset=%d", int(now), int(tz_offset))
+                except (BleakError, asyncio.TimeoutError, OSError) as e:
+                    self._log.warning("rtc sync failed (non-fatal): %s", e)
+            if self._on_connect_cb:
+                try:
+                    self._on_connect_cb()
+                except Exception as e:
+                    self._log.warning("on_connect_cb: %s", e)
+            self._log.info("connected")
+            return True
+
+    async def write(self, payload: dict):
+        async with self._lock:
+            if not await self.ensure_connected():
+                self._log.warning("write skipped: not connected")
+                return
+            line = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
+            try:
+                # response=False: write-without-response, matches Claude
+                # Desktop's own use of NUS RX. With response=True the
+                # bleak macOS backend would block waiting for an ack the
+                # stick doesn't send for this characteristic, freezing
+                # heartbeat_loop and starving subsequent emits.
+                await asyncio.wait_for(
+                    self.client.write_gatt_char(NUS_RX, line, response=False),
+                    timeout=5.0,
+                )
+            except (BleakError, asyncio.TimeoutError) as e:
+                self._log.warning("write failed (%s); dropping client", e)
+                try:
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+                self.client = None
+
+    async def close(self):
+        async with self._lock:
+            if self.client:
+                try:
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+                self.client = None
+
+
+# ─── socket protocol ───────────────────────────────────────────────────
+async def handle_client(reader, writer, state: BuddyState, ble: BleWriter,
+                        dirty: asyncio.Event, apply_event: Callable,
+                        pending: dict, log: logging.Logger):
+    try:
+        data = await reader.read(64 * 1024)
+        if not data:
+            return
+
+        # First decide if this is a request/response (wait_permission) or a
+        # batch of fire-and-forget hook events.
+        first_line = data.splitlines()[0].strip() if data else b""
+        try:
+            head = json.loads(first_line) if first_line else {}
+        except json.JSONDecodeError:
+            head = {}
+
+        if isinstance(head, dict) and head.get("action") == "wait_permission":
+            await _handle_wait_permission(head, writer, state, dirty, pending, log)
+            return
+
+        # Otherwise: treat each line as a hook event.
+        for line in data.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                log.warning("bad event JSON: %r", line[:200])
+                continue
+            log.info("event: %s session=%s",
+                     ev.get("hook_event_name", "?"),
+                     ev.get("session_id", "?"))
+            if apply_event(state, ev):
+                dirty.set()
+    except Exception as e:
+        log.exception("handle_client: %s", e)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def _handle_wait_permission(req, writer, state: BuddyState,
+                                  dirty: asyncio.Event, pending: dict,
+                                  log: logging.Logger):
+    rid = req.get("id") or f"req_{int(time.time() * 1000)}"
+    tool = req.get("tool", "tool")
+    hint = (req.get("hint") or "")[:120]
+    timeout = float(req.get("timeout", 6.0))
+
+    log.info("wait_permission id=%s tool=%s timeout=%.1fs", rid, tool, timeout)
+
+    # Surface the prompt to the stick by setting state.prompt and
+    # signalling dirty — the heartbeat loop will push it next tick.
+    state.waiting = max(state.waiting, 1)
+    state.prompt = {"id": rid, "tool": tool, "hint": hint}
+    state.msg = f"approve: {tool}"
+    dirty.set()
+
+    fut = asyncio.get_running_loop().create_future()
+    pending[rid] = fut
+    try:
+        decision = await asyncio.wait_for(fut, timeout=timeout)
+        log.info("permission %s → %s", rid, decision)
+    except asyncio.TimeoutError:
+        decision = "ask"
+        log.info("permission %s timed out → ask", rid)
+    finally:
+        pending.pop(rid, None)
+        # Clear waiting state.
+        state.waiting = 0
+        state.prompt = None
+        state.msg = ""
+        dirty.set()
+
+    try:
+        writer.write((json.dumps({"decision": decision}) + "\n").encode())
+        await writer.drain()
+    except Exception as e:
+        log.warning("reply failed: %s", e)
+
+
+# ─── loops ─────────────────────────────────────────────────────────────
+async def heartbeat_loop(state: BuddyState, ble: BleWriter,
+                         dirty: asyncio.Event, keepalive_s: float,
+                         log: logging.Logger,
+                         log_fmt: Callable[[dict], str] | None = None):
+    """Emits on dirty event OR every keepalive_s, whichever comes first."""
+    while True:
+        try:
+            await asyncio.wait_for(dirty.wait(), timeout=keepalive_s)
+        except asyncio.TimeoutError:
+            pass  # keepalive
+        dirty.clear()
+        payload = state.to_payload()
+        if log_fmt:
+            log.info("emit: %s", log_fmt(payload))
+        else:
+            log.info("emit: running=%d waiting=%d prompt=%s msg=%s",
+                     payload.get("running", 0), payload.get("waiting", 0),
+                     (payload.get("prompt", {}) or {}).get("id", "-"),
+                     payload.get("msg", "")[:40])
+        await ble.write(payload)
+
+
+async def reconnect_loop(ble: BleWriter, log: logging.Logger):
+    """Background watchdog: try to keep BLE alive."""
+    backoff_idx = 0
+    while True:
+        if ble.client and ble.client.is_connected:
+            backoff_idx = 0
+            await asyncio.sleep(5)
+            continue
+        ok = await ble.ensure_connected()
+        if not ok:
+            wait = RECONNECT_BACKOFF_SEC[min(backoff_idx, len(RECONNECT_BACKOFF_SEC) - 1)]
+            backoff_idx += 1
+            log.info("reconnect in %ss", wait)
+            await asyncio.sleep(wait)
+
+
+# ─── entrypoint ────────────────────────────────────────────────────────
+def run(
+    *,
+    name: str,
+    socket_path: str,
+    log_path: str,
+    device_prefix: str,
+    apply_event: Callable,
+    ptt_keycode: int,
+    keepalive_s: float,
+    rtc_sync_on_connect: bool = False,
+    on_connect_cb: Callable | None = None,
+    extra_tasks: list[Callable] | None = None,
+    log_fmt: Callable[[dict], str] | None = None,
+) -> None:
+    """Configure logging, wire everything up, and run the event loop.
+
+    Parameters
+    ----------
+    name:               Logger name (e.g. "cc-bridge").
+    socket_path:        Unix socket path.
+    log_path:           File log destination.
+    device_prefix:      BLE advertisement prefix to scan for.
+    apply_event:        IDE-specific hook event → state mutation function.
+    ptt_keycode:        macOS kVK code for the PTT key relay.
+    keepalive_s:        Heartbeat keepalive interval in seconds.
+    rtc_sync_on_connect: Send {"time":[epoch,tz]} on BLE connect.
+    on_connect_cb:      Optional sync callback called after BLE connects.
+    extra_tasks:        Optional list of ``async def(state, dirty) -> None``
+                        coroutine factories to add to the task set.
+    log_fmt:            Optional callable(payload) -> str for custom emit log lines.
+    """
+    # ── logging ──
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[
+            logging.FileHandler(log_path),
+            logging.StreamHandler(sys.stderr),
+        ],
+    )
+    log = logging.getLogger(name)
+
+    on_stick_line, pending = make_on_stick_line(ptt_keycode, log)
+
+    ble = BleWriter(
+        device_prefix=device_prefix,
+        on_tx_line=on_stick_line,
+        rtc_sync_on_connect=rtc_sync_on_connect,
+        log=log,
+    )
+    if on_connect_cb:
+        ble._on_connect_cb = on_connect_cb
+
+    async def _main():
+        # Clean up stale socket.
+        try:
+            os.unlink(socket_path)
+        except FileNotFoundError:
+            pass
+
+        state = BuddyState()
+        dirty = asyncio.Event()
+
+        server = await asyncio.start_unix_server(
+            lambda r, w: handle_client(r, w, state, ble, dirty, apply_event, pending, log),
+            path=socket_path,
+        )
+        os.chmod(socket_path, 0o600)
+        log.info("listening on %s", socket_path)
+
+        # Graceful shutdown
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+
+        tasks = [
+            asyncio.create_task(server.serve_forever()),
+            asyncio.create_task(heartbeat_loop(state, ble, dirty, keepalive_s, log, log_fmt)),
+            asyncio.create_task(reconnect_loop(ble, log)),
+        ]
+        if extra_tasks:
+            for factory in extra_tasks:
+                tasks.append(asyncio.create_task(factory(state, dirty)))
+
+        await stop.wait()
+        log.info("shutting down")
+        for t in tasks:
+            t.cancel()
+        await ble.close()
+        server.close()
+        await server.wait_closed()
+        try:
+            os.unlink(socket_path)
+        except FileNotFoundError:
+            pass
+
+    try:
+        asyncio.run(_main())
+    except KeyboardInterrupt:
+        pass

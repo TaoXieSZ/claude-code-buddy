@@ -145,8 +145,10 @@ if [[ ! -d "${VENV}" ]]; then
   echo "→ creating venv at ${VENV}"
   python3 -m venv "${VENV}"
 fi
-echo "→ installing bleak into venv"
-"${VENV}/bin/pip" install --quiet --upgrade pip bleak
+echo "→ installing bleak + pyobjc-framework-Quartz into venv"
+# Quartz: shared buddy_core simulates a keystroke when the stick sends
+# {"cmd":"mic",...} for PTT dictation relay. Same dependency cc-bridge needs.
+"${VENV}/bin/pip" install --quiet --upgrade pip bleak pyobjc-framework-Quartz
 
 # ─── 2. launchd plist ──────────────────────────────────────────────────
 echo "→ writing launchd plist to ${PLIST_DST}"
