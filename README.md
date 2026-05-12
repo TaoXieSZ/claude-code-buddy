@@ -212,8 +212,40 @@ switches button semantics so you can still drive it with A alone:
 Tap A once, then within 300ms press-and-hold A for ≥250ms. While held, a
 blinking red `REC` banner shows on the top of the screen. Release to stop.
 The daemon translates this to a keystroke (default: right Option) that
-triggers your dictation app (e.g., Typeless). Only active from the idle main
-screen (no menus, no prompts).
+triggers your dictation app. Only active from the idle main screen (no
+menus, no prompts).
+
+**Picking the right PTT mode for your dictation app:**
+
+| App                | `*_BRIDGE_PTT_MODE`   | What the daemon does                                  |
+| ------------------ | --------------------- | ----------------------------------------------------- |
+| Typeless           | `tap` (default)       | One down+up tap per stick gesture transition          |
+| 豆包输入法 长按模式 | `hold`                | Key held while you hold A; released on release        |
+| 豆包输入法 免按模式 | `double_tap`          | Double-tap on press; double-tap on release            |
+
+The env var name is `CC_BRIDGE_PTT_MODE` for the Claude Code daemon and
+`CURSOR_BRIDGE_PTT_MODE` for the Cursor daemon. Default is `tap` so the
+out-of-the-box Typeless flow keeps working with no config.
+
+To make a non-default mode survive Mac reboots, add it to the plist:
+
+```xml
+<!-- ~/Library/LaunchAgents/com.cc-bridge.plist, inside EnvironmentVariables -->
+<key>CC_BRIDGE_PTT_MODE</key>
+<string>hold</string>
+```
+
+Then `launchctl unload` + `launchctl load` the plist (or just reboot).
+For a one-shot test without editing the plist:
+
+```bash
+launchctl setenv CC_BRIDGE_PTT_MODE hold
+launchctl kickstart -k gui/$(id -u)/com.cc-bridge
+```
+
+The same `CC_BRIDGE_PTT_KEYCODE` / `CURSOR_BRIDGE_PTT_KEYCODE` (default 61
+= right Option) lets you switch the relayed key if your dictation app
+uses a different hotkey.
 
 ---
 
