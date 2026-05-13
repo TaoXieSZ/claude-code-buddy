@@ -1,0 +1,18 @@
+{
+  "name": "cloudling",
+  "colors": {
+    "body":    "#9CA8FF",
+    "bg":      "#000000",
+    "text":    "#FFFFFF",
+    "textDim": "#808080",
+    "ink":     "#000000"
+  },
+  "states": {
+    "sleep":     "sleep.gif",
+    "idle":      "idle.gif",
+    "busy":      ["busy_0.gif","busy_1.gif","busy_2.gif"],
+    "attention": "attention.gif",
+    "celebrate": "celebrate.gif",
+    "dizzy":     "dizzy.gif"
+  }
+}
