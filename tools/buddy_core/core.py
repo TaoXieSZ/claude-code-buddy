@@ -52,6 +52,11 @@ class BuddyState:
     tokens_today: int = 0
     prompt: dict | None = None
     completed: bool = False  # set briefly after Stop, cleared on next emit
+    # One-shot sound trigger — name of a pre-loaded clip on the speaker
+    # device ("notification" / "permissionrequest" / ...). Set by event
+    # handlers, emitted in next heartbeat as the "play" field, then
+    # cleared the same way `completed` is. Stays None on most ticks.
+    pending_play: str | None = None
 
     # internal — not sent
     # session_id -> {"running": bool, ...}  (bridges may add "last_seen")
@@ -72,6 +77,9 @@ class BuddyState:
             self.completed = False  # one-shot
         if self.prompt is not None:
             p["prompt"] = self.prompt
+        if self.pending_play:
+            p["play"] = self.pending_play
+            self.pending_play = None  # one-shot — firmware plays once
         return p
 
     def add_entry(self, line: str):
@@ -229,6 +237,15 @@ class BleWriter:
         self._on_tx_line = on_tx_line
         self._tx_buf = bytearray()
         self._on_connect_cb: Callable | None = None  # called after successful connect
+        # macOS BleakScanner.discover() disrupts active BLE links during
+        # its scan window — if Peer A is connected and Peer B is missing,
+        # every poll for B knocks A offline for a few seconds. We track
+        # the wall-clock of the last "scanned but found nothing" so the
+        # reconnect loop can back off hard on truly-absent peers without
+        # starving present ones. 30s default — long enough to not thrash,
+        # short enough that a re-plugged stick reconnects within a minute.
+        self._last_failed_scan_ms: float = 0.0
+        self._scan_cooldown_s: float = 30.0
 
     def _tx_handler(self, _char, data: bytearray):
         # NUS TX is line-oriented JSON. Buffer until \n, then parse.
@@ -255,20 +272,32 @@ class BleWriter:
         async with self._connect_lock:
             if self.client and self.client.is_connected:
                 return True
+            # Honor the post-miss scan cooldown so an absent peer doesn't
+            # repeatedly poison live peers with its scans. See note in
+            # __init__ about macOS BleakScanner connection disruption.
+            now_ms = time.monotonic() * 1000.0
+            if self._last_failed_scan_ms and \
+                    (now_ms - self._last_failed_scan_ms) < self._scan_cooldown_s * 1000.0:
+                return False
             self._log.info("scanning for stick (prefix=%s)", self._device_prefix)
             device = None
             try:
                 devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
             except BleakError as e:
                 self._log.warning("scan failed: %s", e)
+                self._last_failed_scan_ms = time.monotonic() * 1000.0
                 return False
             for d in devices:
                 if d.name and d.name.startswith(self._device_prefix):
                     device = d
                     break
             if not device:
-                self._log.warning("no %s* device in scan", self._device_prefix)
+                self._log.warning("no %s* device in scan (cooldown %.0fs)",
+                                  self._device_prefix, self._scan_cooldown_s)
+                self._last_failed_scan_ms = time.monotonic() * 1000.0
                 return False
+            # Found it — clear the cooldown so future drops can rescan promptly.
+            self._last_failed_scan_ms = 0.0
             self._log.info("connecting to %s (%s)", device.name, device.address)
             self.address = device.address
             self.client = BleakClient(device)
@@ -338,6 +367,84 @@ class BleWriter:
                 except Exception:
                     pass
                 self.client = None
+
+    @property
+    def any_connected(self) -> bool:
+        return bool(self.client and self.client.is_connected)
+
+
+# ─── Multi-peer BLE writer ─────────────────────────────────────────────
+# Wraps N BleWriter peers behind the same surface heartbeat/reconnect
+# loops expect. Added 2026-05-13 to let one daemon drive Plus2 stick +
+# StackChan CoreS3 simultaneously (different BLE adv prefixes).
+#
+# Design notes:
+#   - write() fans out to every peer in parallel; each peer independently
+#     handles its own ensure_connected, so a missing/offline peer doesn't
+#     starve the others.
+#   - ensure_connected() = True iff EVERY peer is connected; reconnect_loop
+#     uses this to decide between the calm 5s tick (all healthy) and the
+#     backoff ladder (something still trying).
+#   - any_connected = True if ≥1 peer is live — used by reconnect_loop's
+#     fast-path check so we don't pointlessly rescan when at least one
+#     peer is already up but another is genuinely absent.
+class MultiBleWriter:
+    def __init__(self, prefixes: list[str], on_tx_line=None,
+                 rtc_sync_on_connect: bool = False,
+                 log: logging.Logger | None = None):
+        self._log = log or _log
+        self._peers: list[BleWriter] = [
+            BleWriter(device_prefix=p, on_tx_line=on_tx_line,
+                      rtc_sync_on_connect=rtc_sync_on_connect, log=log)
+            for p in prefixes
+        ]
+        self._on_connect_cb: Callable | None = None
+
+    @property
+    def _on_connect_cb_proxy(self):  # only here for symmetry; never read
+        return None
+
+    def _propagate_on_connect(self):
+        for p in self._peers:
+            p._on_connect_cb = self._on_connect_cb
+
+    @property
+    def any_connected(self) -> bool:
+        return any(p.any_connected for p in self._peers)
+
+    async def ensure_connected(self) -> bool:
+        # All-peers semantics: return True only when every peer is live.
+        # We *do* attempt to connect peers that are currently down each
+        # call — that's how a transient missing peer rejoins. Failures on
+        # individual peers are logged inside BleWriter.ensure_connected.
+        results = await asyncio.gather(
+            *(p.ensure_connected() for p in self._peers),
+            return_exceptions=True,
+        )
+        ok = []
+        for p, r in zip(self._peers, results):
+            if isinstance(r, Exception):
+                self._log.warning("peer %s ensure_connected raised: %s",
+                                  p._device_prefix, r)
+                ok.append(False)
+            else:
+                ok.append(bool(r))
+        return all(ok)
+
+    async def write(self, payload: dict):
+        # Fan out — each peer's BleWriter.write does its own connect
+        # guard + locking. Errors logged per-peer, never raised here so
+        # heartbeat_loop never loses a tick because one peer is grumpy.
+        await asyncio.gather(
+            *(p.write(payload) for p in self._peers),
+            return_exceptions=True,
+        )
+
+    async def close(self):
+        await asyncio.gather(
+            *(p.close() for p in self._peers),
+            return_exceptions=True,
+        )
 
 
 # ─── socket protocol ───────────────────────────────────────────────────
@@ -462,20 +569,23 @@ async def heartbeat_loop(state: BuddyState, ble: BleWriter,
             await asyncio.sleep(1)
 
 
-async def reconnect_loop(ble: BleWriter, log: logging.Logger):
-    """Background watchdog: try to keep BLE alive."""
+async def reconnect_loop(ble, log: logging.Logger):
+    """Background watchdog: try to keep BLE alive.
+
+    Works for both single BleWriter and MultiBleWriter — both expose
+    ``any_connected`` and ``ensure_connected``. Calm 5s tick when every
+    peer is healthy; backoff ladder when something is still trying."""
     backoff_idx = 0
     while True:
-        if ble.client and ble.client.is_connected:
+        ok = await ble.ensure_connected()  # True iff all peers connected
+        if ok:
             backoff_idx = 0
             await asyncio.sleep(5)
             continue
-        ok = await ble.ensure_connected()
-        if not ok:
-            wait = RECONNECT_BACKOFF_SEC[min(backoff_idx, len(RECONNECT_BACKOFF_SEC) - 1)]
-            backoff_idx += 1
-            log.info("reconnect in %ss", wait)
-            await asyncio.sleep(wait)
+        wait = RECONNECT_BACKOFF_SEC[min(backoff_idx, len(RECONNECT_BACKOFF_SEC) - 1)]
+        backoff_idx += 1
+        log.info("reconnect in %ss", wait)
+        await asyncio.sleep(wait)
 
 
 # ─── entrypoint ────────────────────────────────────────────────────────
@@ -527,14 +637,30 @@ def run(
 
     on_stick_line, pending = make_on_stick_line(ptt_keycode, ptt_mode, log)
 
-    ble = BleWriter(
-        device_prefix=device_prefix,
-        on_tx_line=on_stick_line,
-        rtc_sync_on_connect=rtc_sync_on_connect,
-        log=log,
-    )
-    if on_connect_cb:
-        ble._on_connect_cb = on_connect_cb
+    # device_prefix is comma-separated for multi-peer (Plus2 + StackChan).
+    # A single token (no comma) preserves the original single-peer
+    # codepath so existing single-stick deployments are unaffected.
+    prefixes = [p.strip() for p in device_prefix.split(",") if p.strip()]
+    if len(prefixes) > 1:
+        log.info("multi-peer BLE: %s", prefixes)
+        ble = MultiBleWriter(
+            prefixes=prefixes,
+            on_tx_line=on_stick_line,
+            rtc_sync_on_connect=rtc_sync_on_connect,
+            log=log,
+        )
+        if on_connect_cb:
+            ble._on_connect_cb = on_connect_cb
+            ble._propagate_on_connect()
+    else:
+        ble = BleWriter(
+            device_prefix=prefixes[0] if prefixes else device_prefix,
+            on_tx_line=on_stick_line,
+            rtc_sync_on_connect=rtc_sync_on_connect,
+            log=log,
+        )
+        if on_connect_cb:
+            ble._on_connect_cb = on_connect_cb
 
     async def _main():
         # Clean up stale socket.

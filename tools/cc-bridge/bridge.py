@@ -79,6 +79,16 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
     sid = ev.get("session_id") or ev.get("sessionId") or "anon"
     changed = False
 
+    # Universal sound dispatch — every recognized event sets pending_play
+    # to the lowercase event name; firmware looks up /sounds/<name>.wav on
+    # LittleFS and plays it. Unknown names silently no-op on firmware
+    # (sound.cpp only loads .wav files present on disk). Specific event
+    # handlers below MAY override pending_play with a more specific clip
+    # name if that turns out useful, but for now 1:1 mapping is enough.
+    if name:
+        state.pending_play = name.lower()
+        changed = True  # heartbeat must emit so firmware gets the cue
+
     # Semantics matter — Claude Code's `Stop` is "assistant turn ended", NOT
     # "session terminated". Don't decrement `total` there. And don't set
     # `completed`; that's reserved for level-ups in the upstream protocol
