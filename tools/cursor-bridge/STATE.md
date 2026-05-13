@@ -107,6 +107,29 @@ The stick consumes this JSON shape (full parser in `src/data.h _applyJson`):
   prompts. Set `CURSOR_HOOK_DEBUG=1` to append every matcher decision
   to `/tmp/cursor-hook-debug.jsonl` for auditing.
 
+- **Sentinel-file kill switch** for the stick gate (no Cursor or daemon
+  restart needed):
+
+  ```bash
+  touch /tmp/cursor-bridge-echo-off   # silence stick prompts now
+  rm    /tmp/cursor-bridge-echo-off   # re-enable
+  ```
+
+  When the file exists, the hook short-circuits to noop on every event —
+  matcher still runs for safe shell commands, but anything that would
+  otherwise hit the daemon just returns "no opinion" and lets Cursor's
+  own permission flow (and any concurrent hooks like vibe-island-bridge
+  / AhaKey) make the call. Useful when Cursor's bypass-permission
+  toggle is on per-conversation and you don't want a duplicate gate on
+  the stick — Cursor doesn't expose its bypass state to hooks (verified
+  May 2026, cursor 3.3.30), so this is the manual escape hatch.
+
+  Heavier disable still works:
+  `launchctl setenv CURSOR_BRIDGE_PERMISSION_ECHO 0` then restart
+  Cursor + daemon — but that requires a Cursor relaunch since process
+  env is frozen at startup. The sentinel file is per-invocation, so it
+  flips instantly.
+
 ## Known not-yet-wired
 
 | Item | Why | Priority if needed later |

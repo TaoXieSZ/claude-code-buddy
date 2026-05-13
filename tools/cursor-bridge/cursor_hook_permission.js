@@ -38,6 +38,17 @@
 //   redirect, substitution, chain) hard-rejects the match so the command
 //   falls through to the stick.
 //
+// Sentinel-file kill switch (no Cursor/daemon restart needed):
+//   `touch /tmp/cursor-bridge-echo-off` — silence stick prompts entirely
+//                                         (matcher still runs, but
+//                                         non-matching commands no-op
+//                                         instead of going to the stick).
+//   `rm    /tmp/cursor-bridge-echo-off` — re-enable.
+//   Useful when Cursor's own bypass-permission toggle is on and you don't
+//   want a duplicate gate on the stick. Cursor doesn't expose its bypass
+//   state to hooks (verified May 2026, cursor 3.3.30), so this is the
+//   manual escape hatch.
+//
 // The hook MUST exit cleanly within `CURSOR_BRIDGE_PERMISSION_TIMEOUT_S +
 // headroom` even if the daemon is down — never block Cursor on a side
 // channel that may be temporarily offline.
@@ -49,7 +60,15 @@ const net  = require('net');
 
 const SOCKET_PATH = process.env.CURSOR_BRIDGE_SOCKET || '/tmp/cursor-bridge.sock';
 const TIMEOUT_S   = Number(process.env.CURSOR_BRIDGE_PERMISSION_TIMEOUT_S || 8);
-const ECHO_ENABLED = (process.env.CURSOR_BRIDGE_PERMISSION_ECHO || '1') !== '0';
+
+// Sentinel file lets us silence stick prompts WITHOUT restarting Cursor or
+// the daemon — useful when the user has Cursor's bypass-permission toggled
+// on and doesn't want a duplicate gate on the stick. `touch` to silence,
+// `rm` to re-enable. Hook checks per-invocation.
+const ECHO_OFF_SENTINEL = '/tmp/cursor-bridge-echo-off';
+const ECHO_ENABLED =
+    (process.env.CURSOR_BRIDGE_PERMISSION_ECHO || '1') !== '0' &&
+    !fs.existsSync(ECHO_OFF_SENTINEL);
 const MATCHER_ENABLED = (process.env.CURSOR_BRIDGE_PERMISSION_MATCHER || '1') !== '0';
 
 // Hard cap on the whole hook process. Daemon's wait_permission timeout +
