@@ -22,6 +22,7 @@ uint8_t g_brightness  = 200;
 char    g_char_name[24] = "";
 bool    g_motion      = true;
 bool    g_idle_wiggle = true;
+uint8_t g_tilt        = 65;   // degrees, 0..90; servo Y baseline
 
 }  // namespace
 
@@ -34,6 +35,8 @@ void settingsInit() {
   g_brightness = g_nvs.getUChar("bright", g_brightness);
   g_motion     = g_nvs.getBool ("motion", g_motion);
   g_idle_wiggle= g_nvs.getBool ("idlew",  g_idle_wiggle);
+  g_tilt       = g_nvs.getUChar("tilt",   g_tilt);
+  if (g_tilt > 90) g_tilt = 90;
   String cn    = g_nvs.getString("char",  "");
   size_t cl    = cn.length();
   if (cl > 0) {
@@ -41,10 +44,11 @@ void settingsInit() {
     memcpy(g_char_name, cn.c_str(), cl);
     g_char_name[cl] = 0;
   }
-  Serial.printf("[set] loaded: vol=%u bright=%u motion=%d idlew=%d char='%s'\n",
-                g_volume, g_brightness, g_motion, g_idle_wiggle, g_char_name);
+  Serial.printf("[set] loaded: vol=%u bright=%u motion=%d idlew=%d tilt=%u char='%s'\n",
+                g_volume, g_brightness, g_motion, g_idle_wiggle, g_tilt, g_char_name);
 
-  // Apply baseline ASAP so boot UI matches saved state.
+  // Apply baseline ASAP so boot UI matches saved state. tilt is applied
+  // later by main.cpp after motionInit (servo subsystem must be up first).
   M5.Speaker.setVolume(g_volume);
   M5.Lcd.setBrightness(g_brightness);
 }
@@ -54,6 +58,7 @@ uint8_t  settingsGetBrightness()    { return g_brightness; }
 const char* settingsGetCharName()   { return g_char_name; }
 bool     settingsGetMotionEnabled() { return g_motion; }
 bool     settingsGetIdleWiggleEnabled() { return g_idle_wiggle; }
+uint8_t  settingsGetTilt()          { return g_tilt; }
 
 void settingsSetVolume(uint8_t v) {
   g_volume = v;
@@ -92,4 +97,12 @@ void settingsSetIdleWiggleEnabled(bool on) {
   g_nvs.putBool("idlew", on);
   motionSetIdleWiggle(on);
   Serial.printf("[set] idlew=%d\n", on);
+}
+
+void settingsSetTilt(uint8_t deg) {
+  if (deg > 90) deg = 90;
+  g_tilt = deg;
+  g_nvs.putUChar("tilt", deg);
+  motionSetTilt(deg);
+  Serial.printf("[set] tilt=%u\n", deg);
 }

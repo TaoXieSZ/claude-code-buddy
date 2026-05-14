@@ -155,6 +155,10 @@ static void applyJsonLine(const char* line) {
       settingsSetIdleWiggleEnabled(doc["enabled"] | true);
       return;
     }
+    if (strcmp(cmd, "tilt") == 0) {
+      settingsSetTilt((uint8_t)(int)(doc["v"] | 65));
+      return;
+    }
   }
 
   bool is_done = false;
@@ -345,6 +349,7 @@ void setup() {
   // up the servo rail and homes both axes. Conservative move speeds in
   // motion.cpp keep peak current within USB-only budget.
   motionInit();
+  motionSetTilt(settingsGetTilt());           // before enable so initial park uses correct Y
   motionSetEnabled(settingsGetMotionEnabled());
   motionSetIdleWiggle(settingsGetIdleWiggleEnabled());
 

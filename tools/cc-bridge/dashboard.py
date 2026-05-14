@@ -40,53 +40,169 @@ DASHBOARD_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <title>StackChan Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-           max-width: 480px; margin: 32px auto; padding: 0 16px; }
-    h1 { font-size: 1.4em; margin-bottom: 0.2em; }
-    .sub { color: #888; font-size: 0.9em; margin-bottom: 24px; }
-    .row { margin: 18px 0; }
-    label { display: block; font-weight: 600; margin-bottom: 6px; }
-    input[type=range] { width: 100%; }
-    select { width: 100%; padding: 6px; font-size: 1em; }
-    .val { font-variant-numeric: tabular-nums; color: #666; }
+    :root {
+      color-scheme: light dark;
+      --bg: #fafafa;
+      --card: #ffffff;
+      --text: #1a1a1a;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #d97757;
+      --err: #c44;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f0f10;
+        --card: #1a1a1c;
+        --text: #f5f5f7;
+        --muted: #9ca3af;
+        --border: #2a2a2d;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+      max-width: 540px;
+      margin: 0 auto;
+      padding: 40px 24px 60px;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    h1 {
+      font-size: 1.7em;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 6px;
+    }
+    .sub { color: var(--muted); font-size: 0.95em; margin-bottom: 28px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 20px;
+      margin-bottom: 14px;
+    }
+    .row + .row { margin-top: 22px; }
+    .label-line {
+      display: flex; justify-content: space-between; align-items: baseline;
+      margin-bottom: 4px; gap: 12px;
+    }
+    label.main {
+      font-weight: 600; font-size: 1em; color: var(--text);
+      cursor: default;
+    }
+    .val {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.85em;
+      color: var(--muted);
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .help {
+      color: var(--muted);
+      font-size: 0.85em;
+      line-height: 1.45;
+      margin: 4px 0 12px;
+    }
+    input[type=range] {
+      width: 100%;
+      accent-color: var(--accent);
+      height: 4px;
+    }
+    select {
+      width: 100%;
+      padding: 9px 12px;
+      font-size: 1em;
+      font-family: inherit;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+    }
     .toggle { display: flex; align-items: center; gap: 12px; }
-    .toggle input { width: 18px; height: 18px; }
-    .status { color: #888; font-size: 0.85em; margin-top: 24px; }
-    .err { color: #c44; }
+    .toggle input { width: 20px; height: 20px; accent-color: var(--accent); cursor: pointer; }
+    .toggle label.main { cursor: pointer; }
+    .status {
+      color: var(--muted);
+      font-size: 0.8em;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+      margin-top: 24px;
+      padding: 10px 14px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      word-break: break-all;
+    }
+    .status.err { color: var(--err); }
+    code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.85em; padding: 1px 4px; background: var(--bg); border-radius: 3px; }
   </style>
 </head>
 <body>
   <h1>StackChan</h1>
-  <div class="sub">live settings — saved on the device</div>
+  <div class="sub">Live settings — every change saves to the device's NVS and survives reboots.</div>
 
-  <div class="row">
-    <label>Volume <span class="val" id="vol_v">96</span> / 255</label>
-    <input type="range" id="vol" min="0" max="255" value="96">
+  <div class="card">
+    <div class="row">
+      <div class="label-line">
+        <label class="main" for="vol">Volume</label>
+        <span class="val"><span id="vol_v">96</span> / 255</span>
+      </div>
+      <p class="help">Speaker output for hook-event WAV clips (PermissionRequest, Stop, PreToolUse, etc.). Below ~40 you won't hear it across a desk; 96 is comfortable at arm's length.</p>
+      <input type="range" id="vol" min="0" max="255" value="96">
+    </div>
+
+    <div class="row">
+      <div class="label-line">
+        <label class="main" for="bright">Screen brightness</label>
+        <span class="val"><span id="bright_v">200</span> / 255</span>
+      </div>
+      <p class="help">CoreS3 LCD backlight. 255 is full burn; 200 is comfortable at desk distance; below 60 is hard to read in daylight.</p>
+      <input type="range" id="bright" min="0" max="255" value="200">
+    </div>
+
+    <div class="row">
+      <div class="label-line">
+        <label class="main" for="tilt">Head tilt</label>
+        <span class="val"><span id="tilt_v">65</span>°</span>
+      </div>
+      <p class="help">Where the head rests when not actively animating. <code>0°</code> = chin to chest (screen pointed at desk). <code>90°</code> = straight up at the ceiling. <code>50–70°</code> presents the face at typical desk-sitting eye level. Pattern motion (nod, look-around, dance) adds <code>±5–8°</code> on top.</p>
+      <input type="range" id="tilt" min="0" max="90" value="65">
+    </div>
   </div>
 
-  <div class="row">
-    <label>Brightness <span class="val" id="bright_v">200</span> / 255</label>
-    <input type="range" id="bright" min="0" max="255" value="200">
+  <div class="card">
+    <div class="row">
+      <label class="main" for="char">Character pack</label>
+      <p class="help">Which sprite pack drives the face. Options come from <code>data/characters/</code> on the daemon machine; flash a new pack with <code>pio run -t uploadfs</code> and it appears here on next page load.</p>
+      <select id="char"></select>
+    </div>
   </div>
 
-  <div class="row">
-    <label>Character pack</label>
-    <select id="char"></select>
+  <div class="card">
+    <div class="row toggle">
+      <input type="checkbox" id="motion" checked>
+      <label class="main" for="motion">Servo motion</label>
+    </div>
+    <p class="help">Master switch for the head-and-neck servos. Off parks the head at the tilt baseline and silences the motors — useful when screen-recording or in a meeting.</p>
   </div>
 
-  <div class="row toggle">
-    <input type="checkbox" id="motion" checked>
-    <label for="motion" style="margin:0">Servo motion (uncheck for quiet mode)</label>
+  <div class="card">
+    <div class="row toggle">
+      <input type="checkbox" id="idle_wiggle" checked>
+      <label class="main" for="idle_wiggle">Idle wiggle</label>
+    </div>
+    <p class="help">When the daemon is idle (no Claude activity), peek left/right every ~12 s so the character feels alive. Off makes idle a hard freeze at the tilt baseline.</p>
   </div>
 
-  <div class="row toggle">
-    <input type="checkbox" id="idle_wiggle" checked>
-    <label for="idle_wiggle" style="margin:0">Idle wiggle (gentle look-around when idle)</label>
-  </div>
-
-  <div class="status" id="status">idle</div>
+  <div class="status" id="status">ready</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -101,15 +217,12 @@ async function post(cmd) {
   } catch (e) { setStatus(e.message, true); }
 }
 
-// Debounce sliders so we don't flood BLE while dragging.
-function debounced(fn, ms) { let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; }
-
 $('vol').oninput    = e => $('vol_v').textContent = e.target.value;
 $('vol').onchange   = e => post({cmd:'vol', v: +e.target.value});
-
 $('bright').oninput  = e => $('bright_v').textContent = e.target.value;
 $('bright').onchange = e => post({cmd:'bright', v: +e.target.value});
-
+$('tilt').oninput  = e => $('tilt_v').textContent = e.target.value;
+$('tilt').onchange = e => post({cmd:'tilt', v: +e.target.value});
 $('motion').onchange      = e => post({cmd:'motion', enabled: e.target.checked});
 $('idle_wiggle').onchange = e => post({cmd:'idle_wiggle', enabled: e.target.checked});
 $('char').onchange        = e => post({cmd:'char', name: e.target.value});
@@ -122,8 +235,8 @@ fetch('/api/characters').then(r=>r.json()).then(list => {
   if (saved) { try { sel.value = JSON.parse(saved).name; } catch(e){} }
 });
 
-// Restore other sliders from localStorage so the UI reflects last push.
-['vol','bright'].forEach(k => {
+// Restore sliders + toggles from localStorage so the UI reflects last push.
+['vol','bright','tilt'].forEach(k => {
   const s = localStorage.getItem('stackchan_'+k);
   if (s) { try { const v = JSON.parse(s).v; $(k).value = v; $(k+'_v').textContent = v; } catch(e){} }
 });

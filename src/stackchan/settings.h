@@ -29,3 +29,8 @@ void     settingsSetMotionEnabled(bool on);
 
 bool     settingsGetIdleWiggleEnabled();
 void     settingsSetIdleWiggleEnabled(bool on);
+
+// Head-up tilt in degrees (0..90). Default 65 (~head-up but well clear
+// of the mechanical stop). Persisted to NVS, applied via motionSetTilt.
+uint8_t  settingsGetTilt();
+void     settingsSetTilt(uint8_t deg);

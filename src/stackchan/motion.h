@@ -36,3 +36,9 @@ void motionTick();
 // "stay at home" pattern, leaving all other states animated.
 void motionSetEnabled(bool on);
 void motionSetIdleWiggle(bool on);
+
+// Head-up tilt baseline in degrees (0..90). Every pattern step's Y
+// becomes a signed delta from this baseline; setting it 0 puts the
+// head looking down (chin to chest), 90 puts it looking straight up.
+// Dashboard slider is the primary caller; persisted via settings.cpp.
+void motionSetTilt(uint8_t deg);

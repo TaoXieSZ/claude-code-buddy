@@ -26,60 +26,62 @@ struct Step {
 
 // Patterns. Sentinel (dwell=0) marks loop point — when reached, restart.
 // Speeds tuned conservatively; one pattern (CELEBRATE) goes fast.
-// Y geometry: BSP doc has Y range 0..900 = 0°..90° where 0 looks DOWN
-// (chin to chest) and 900 looks straight UP. The original patterns hovered
-// around y=450 (mid) — visually the face was tilted half-way down, which
-// means the LCD is angled away from a desk-sitting user. Bumped all
-// baselines into the 700–850 range so the screen always faces up at the
-// human. Sub-state variation (nod/look-around) still happens, just stays
-// in the "head up" half of the workspace.
-const Step PAT_SLEEP[]     = { {0,   780, 200,  10000}, {0, 0, 0, 0} };
+// Y geometry note: BSP range is 0..900 = 0°..90°, 0=looks down, 900=straight up.
+// Step.y is now a SIGNED DELTA from the user-configurable head-up baseline
+// (g_y_baseline, default 650 = 65°). issueStep() adds the delta and clamps
+// to [0, 900]. Earlier we used absolute Y values centred on 800 — that put
+// the head all the way against its mechanical stop ("顶天了" feedback), and
+// there was no way to dial it back without a reflash. Dashboard slider now
+// owns the baseline; patterns just contribute sub-state motion around it.
+const Step PAT_SLEEP[]     = { {0,   -20, 200,  10000}, {0, 0, 0, 0} };
 const Step PAT_IDLE[]      = {
-  {0,   800, 200, 4000},     // home (head up), breathe
-  {300, 820, 250, 1500},     // peek right
-  {-300,820, 250, 1500},     // peek left
-  {0,   800, 200, 5000},     // back to head-up center, settle
+  {0,     0, 200, 4000},     // baseline, breathe
+  {300,  20, 250, 1500},     // peek right, tiny tilt-up
+  {-300, 20, 250, 1500},     // peek left, tiny tilt-up
+  {0,     0, 200, 5000},     // back to baseline, settle
   {0, 0, 0, 0}
 };
 const Step PAT_BUSY[]      = {
-  // ±10° amplitude around the head-up baseline; same slow speed +
-  // 3.5s rest as before so the servos still get quiet between nods.
-  {0, 850, 200, 900},        // gentle nod-up
-  {0, 750, 200, 900},        // gentle nod-down (still above mid)
-  {0, 800, 200, 3500},       // hold head-up center, rest
+  // ±5° around baseline + 3.5 s rest — same quiet pacing as before.
+  {0,  50, 200, 900},        // gentle nod-up
+  {0, -50, 200, 900},        // gentle nod-down
+  {0,   0, 200, 3500},       // hold baseline, rest (quiet)
   {0, 0, 0, 0}
 };
 const Step PAT_ATTENTION[] = {
-  {800, 850, 500, 600},      // look right + alert head-up
-  {-800,850, 500, 600},      // look left + alert head-up
+  {800,  50, 500, 600},      // look right, alert lift
+  {-800, 50, 500, 600},      // look left, alert lift
   {0, 0, 0, 0}
 };
 const Step PAT_CELEBRATE[] = {
-  {600, 870, 800, 250},
-  {-600,870, 800, 250},
-  {600, 750, 800, 250},
-  {-600,750, 800, 250},
-  {0,   820, 400, 800},
+  {600,  70, 800, 250},
+  {-600, 70, 800, 250},
+  {600, -50, 800, 250},
+  {-600,-50, 800, 250},
+  {0,    20, 400, 800},
   {0, 0, 0, 0}
 };
 const Step PAT_DIZZY[]     = {
-  {500,  720, 700, 250},
-  {-500, 870, 700, 250},
-  {500,  870, 700, 250},
-  {-500, 720, 700, 250},
+  {500, -80, 700, 250},
+  {-500, 70, 700, 250},
+  {500,  70, 700, 250},
+  {-500,-80, 700, 250},
   {0, 0, 0, 0}
 };
 const Step PAT_HEART[]     = {
-  {400, 820, 200, 1200},
-  {-400,820, 200, 1200},
+  {400,  20, 200, 1200},
+  {-400, 20, 200, 1200},
   {0, 0, 0, 0}
 };
-// "Quiet" pattern when idle_wiggle is disabled. Head-up rest position,
-// long re-arm so the servos never twitch.
+// "Quiet" pattern when idle_wiggle is disabled — sits at baseline.
 const Step PAT_IDLE_QUIET[] = {
-  {0, 800, 200, 60000},      // head-up center, hold for a minute, loop
+  {0, 0, 200, 60000},        // baseline, hold for a minute, loop
   {0, 0, 0, 0}
 };
+
+// Runtime-tunable head-up baseline (tenths of degrees, 0..900).
+// Default 650 = 65° tilt-up; user changes via dashboard.
+int16_t g_y_baseline = 650;
 
 const Step* PATTERNS[CHAR_N_STATES] = {
   PAT_SLEEP, PAT_IDLE, PAT_BUSY, PAT_ATTENTION,
@@ -99,7 +101,14 @@ uint32_t      g_next_at  = 0;
 bool          g_running  = false;
 
 void issueStep(const Step& s) {
-  ::M5StackChan.Motion.move(s.x, s.y, s.speed);
+  // s.y is a signed delta from the configurable baseline (in tenths of
+  // degrees). Clamp the absolute target to the BSP's [0, 900] range so
+  // a high baseline + a "tilt up" pattern step doesn't slam past the
+  // mechanical stop.
+  int y = (int)g_y_baseline + (int)s.y;
+  if (y < 0)   y = 0;
+  if (y > 900) y = 900;
+  ::M5StackChan.Motion.move(s.x, y, s.speed);
 }
 
 }  // namespace
@@ -107,10 +116,10 @@ void issueStep(const Step& s) {
 void motionInit() {
   ::M5StackChan.begin();
   ::M5StackChan.setServoPowerEnabled(true);
-  // BSP's goHome() parks at (0, 0) — Y=0 looks straight down, hiding
-  // the screen from a desk-sitting user. We override to (0, 800) so
-  // the head defaults to looking up, screen presented to the user.
-  ::M5StackChan.Motion.move(0, 800, 250);
+  // Park at baseline (head-up) so the very first move presents the
+  // screen. BSP's goHome would park at Y=0 (chin-to-chest); we don't
+  // want that even momentarily.
+  ::M5StackChan.Motion.move(0, g_y_baseline, 250);
   g_next_at = millis() + 1000;
 }
 
@@ -132,14 +141,27 @@ void motionSetState(uint8_t state) {
 void motionSetEnabled(bool on) {
   g_master_enabled = on;
   if (!on) {
-    // Park at head-up so disabling motion still leaves the screen
-    // facing the user, not the desk. Servos stay powered to hold pose.
-    ::M5StackChan.Motion.move(0, 800, 250);
+    // Park at baseline (head-up) so "quiet mode" still presents the
+    // screen. Servos stay powered to hold pose.
+    ::M5StackChan.Motion.move(0, g_y_baseline, 250);
     g_running = false;
   } else if (g_state < CHAR_N_STATES) {
     // Resume: recompute pattern for current state.
     motionSetState((uint8_t)(g_state ^ 0xFF));  // force-mismatch
     motionSetState(g_state);
+  }
+}
+
+void motionSetTilt(uint8_t deg) {
+  if (deg > 90) deg = 90;
+  g_y_baseline = (int16_t)deg * 10;   // 0..90° → 0..900 in BSP units
+  // Re-issue current pattern step at the new baseline immediately so
+  // the head visibly responds to the slider without waiting for the
+  // next pattern step.
+  if (g_running && g_pattern && g_step_i > 0) {
+    issueStep(g_pattern[g_step_i - 1]);
+  } else {
+    ::M5StackChan.Motion.move(0, g_y_baseline, 250);
   }
 }
 
