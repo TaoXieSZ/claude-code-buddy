@@ -190,6 +190,17 @@ static void applyJsonLine(const char* line) {
   const char* colon = (msg && *msg) ? strchr(msg, ':') : nullptr;
   if (colon && colon[1] == ' ') tool = colon + 2;
   characterSetStats(running, waiting, tokens, tool);
+
+  // OMC-HUD metrics — sent by the cc-bridge `hud` event (statusline
+  // proxy → openspec change 0002). All fields default to 0/"" so a
+  // heartbeat from a daemon that doesn't emit them just shows zeros.
+  characterSetHud(
+      doc["context_pct"] | 0,
+      doc["model"]       | "",
+      doc["tokens"]      | (uint32_t)0,
+      doc["limit_5h"]    | 0,
+      doc["limit_7d"]    | 0,
+      doc["session_ms"]  | (uint32_t)0);
 }
 
 // ---- BLE callbacks --------------------------------------------------------

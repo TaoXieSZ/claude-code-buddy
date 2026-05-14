@@ -50,3 +50,10 @@ void characterSetMsg(const char* msg);
 // Bottom status bar — stats line ("R:N W:N  tok:Xk"). Repainted lazily.
 // Pass tool=nullptr/empty when no tool is active.
 void characterSetStats(int running, int waiting, uint32_t tokens, const char* tool);
+
+// Top HUD card — live OMC-HUD metrics from the cc-bridge `hud` event
+// (openspec change 0002): context window %, active model, real token
+// count, rolling 5h/7d rate-limit %, session elapsed ms. Repainted
+// lazily on change.
+void characterSetHud(int context_pct, const char* model, uint32_t tokens,
+                     int limit_5h, int limit_7d, uint32_t session_ms);

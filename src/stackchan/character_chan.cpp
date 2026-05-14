@@ -22,21 +22,20 @@
 namespace {
 
 // --- Geometry --------------------------------------------------------------
-// 2026-05-14 layout v2 — face-first, speech bubble:
-//   ┌── HUD bar 20px ─────────────────────────┐
-//   │ R:N W:N                       tok:Nk    │
+// 2026-05-14 layout v3 — 2-row OMC-HUD card on top (openspec 0002):
+//   ┌── HUD card (2 rows, 50px) ──────────────┐
+//   │ <model>                      <ctx>% ctx │
+//   │ <session> <tokens> tok    5h N%  7d N%  │
 //   ├────────────────────────┬────────────────┤
 //   │                        │  speech bubble │
-//   │     GIF face           │◀ rounded, tail │
-//   │     180 × 212          │  msg wrap      │
+//   │     GIF face           │◀ state header  │
+//   │     176 × 178          │  msg wrap      │
 //   │                        ├────────────────┤
 //   │                        │  tool chip     │
 //   └────────────────────────┴────────────────┘
-// Reasons over v1: face is the personality — give it the dominant
-// area (was 130×144, now 180×212). The right column becomes a true
-// bubble + tool chip pair, with state-coloured border so the
-// glance-test answer "what is Claude doing?" works without reading
-// the msg. HUD on top frees the bottom for full-height bubble.
+// The face is the personality and keeps the dominant area; the right
+// column is a state-coloured bubble + tool chip; the top card carries
+// the live OMC-HUD metrics relayed by the cc-bridge `hud` event.
 // Animal-Crossing / NookPhone palette (ref: guokaigdg/animal-island-ui
 // design tokens). Warm cream "cards" with a 2px brown border and the
 // signature flat offset drop-shadow, floating on a dark canvas like
@@ -54,15 +53,15 @@ constexpr int      CARD_BW      = 2;        // border width
 constexpr int      CARD_SHADOW_DY = 4;      // shadow vertical offset
 
 constexpr int  HUD_Y         = 2;
-constexpr int  HUD_H         = 32;   // card; +CARD_SHADOW_DY ends at 38
+constexpr int  HUD_H         = 50;   // 2-row card; +CARD_SHADOW_DY ends at 56
 constexpr int  CHAR_BOX_X    = 4;
-constexpr int  CHAR_BOX_Y    = 40;
+constexpr int  CHAR_BOX_Y    = 58;
 constexpr int  CHAR_BOX_W    = 176;
-constexpr int  CHAR_BOX_H    = 196;
+constexpr int  CHAR_BOX_H    = 178;
 constexpr int  BUBBLE_X      = 184;
-constexpr int  BUBBLE_Y      = 44;
+constexpr int  BUBBLE_Y      = 60;
 constexpr int  BUBBLE_W      = 132;
-constexpr int  BUBBLE_H      = 148;
+constexpr int  BUBBLE_H      = 132;
 constexpr int  BUBBLE_R      = 14;
 constexpr int  BUBBLE_PAD    = 8;
 constexpr int  BUBBLE_HEAD_H = 20;   // top status strip inside card
@@ -135,7 +134,15 @@ int          g_running       = 0;
 int          g_waiting       = 0;
 uint32_t     g_tokens        = 0;
 char         g_tool[24]      = "";
-char         g_stats_drawn[64] = "";   // last rendered stats line
+char         g_stats_drawn[128] = "";   // last rendered stats line
+
+// HUD card metrics — from the cc-bridge `hud` event (openspec 0002).
+int          g_context_pct   = 0;
+char         g_model[24]     = "";
+uint32_t     g_hud_tokens    = 0;
+int          g_limit_5h      = 0;
+int          g_limit_7d      = 0;
+uint32_t     g_session_ms    = 0;
 
 // Scanline buffer — sized for max output width at TARGET_H scale. The
 // largest output width is sleep.gif/busy.gif at aspect ratio ~120:118
@@ -406,36 +413,76 @@ void drawBubbleCard(uint8_t state) {
                     sx + 8, sy + BUBBLE_HEAD_H / 2);
 }
 
-// HUD = a single ACNH cream card spanning the top: R/W counters left,
-// token count right, warm brown text on cream. One row — ACNH UIs
-// favour chunky single-line readouts over tiny stacked caps labels.
-void drawHud(int running, int waiting, uint32_t tokens) {
+// Compact token count: "850", "48.0k", "1.2M".
+void fmtTokens(uint32_t t, char* buf, size_t n) {
+  if (t >= 1000000) {
+    snprintf(buf, n, "%lu.%luM", (unsigned long)(t / 1000000),
+             (unsigned long)((t / 100000) % 10));
+  } else if (t >= 1000) {
+    snprintf(buf, n, "%lu.%luk", (unsigned long)(t / 1000),
+             (unsigned long)((t / 100) % 10));
+  } else {
+    snprintf(buf, n, "%lu", (unsigned long)t);
+  }
+}
+
+// Session elapsed: "45s", "12m", "1h23m".
+void fmtDuration(uint32_t ms, char* buf, size_t n) {
+  uint32_t s = ms / 1000;
+  if (s < 60)        snprintf(buf, n, "%lus", (unsigned long)s);
+  else if (s < 3600) snprintf(buf, n, "%lum", (unsigned long)(s / 60));
+  else snprintf(buf, n, "%luh%lum", (unsigned long)(s / 3600),
+                (unsigned long)((s % 3600) / 60));
+}
+
+// HUD = a 2-row ACNH cream card spanning the top, carrying the live
+// OMC-HUD metrics (openspec 0002):
+//   row 1:  <model>                              <context%> ctx
+//   row 2:  <session> · <tokens> tok       5h <n>%  7d <n>%
+// All from the cc-bridge `hud` event; warm brown text on cream.
+void drawHud() {
   int x = 4;
   int w = M5.Lcd.width() - 8;
-  drawAcnhCard(x, HUD_Y, w, HUD_H, HUD_H / 2, CARD_FILL);
+  drawAcnhCard(x, HUD_Y, w, HUD_H, 16, CARD_FILL);
 
-  int text_y = HUD_Y + HUD_H / 2;
   int pad    = CARD_BW + 10;
+  int row1_y = HUD_Y + 15;
+  int row2_y = HUD_Y + 35;
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
 
-  char left[24];
-  snprintf(left, sizeof(left), "R %d   W %d", running, waiting);
+  // Row 1 left — model (truncated to the left half).
+  char model[24];
+  strncpy(model, g_model[0] ? g_model : "—", sizeof(model) - 1);
+  model[sizeof(model) - 1] = 0;
   M5.Lcd.setTextColor(CARD_TEXT, CARD_FILL);
   M5.Lcd.setTextDatum(middle_left);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setFont(&fonts::FreeSansBold12pt7b);
-  M5.Lcd.drawString(left, x + pad, text_y);
-
-  char right[20];
-  if (tokens >= 1000) {
-    snprintf(right, sizeof(right), "%lu.%luk tok",
-             (unsigned long)(tokens / 1000),
-             (unsigned long)((tokens / 100) % 10));
-  } else {
-    snprintf(right, sizeof(right), "%lu tok", (unsigned long)tokens);
+  int model_max = w / 2;
+  while (M5.Lcd.textWidth(model) > model_max && strlen(model) > 1) {
+    model[strlen(model) - 1] = 0;
   }
-  M5.Lcd.setTextColor(CARD_TEXT_SEC, CARD_FILL);
+  M5.Lcd.drawString(model, x + pad, row1_y);
+
+  // Row 1 right — context window %.
+  char ctx[16];
+  snprintf(ctx, sizeof(ctx), "%d%% ctx", g_context_pct);
   M5.Lcd.setTextDatum(middle_right);
-  M5.Lcd.drawString(right, x + w - pad, text_y);
+  M5.Lcd.drawString(ctx, x + w - pad, row1_y);
+
+  // Row 2 left — session elapsed · token count.
+  char dur[12], tok[12], l2[32];
+  fmtDuration(g_session_ms, dur, sizeof(dur));
+  fmtTokens(g_hud_tokens, tok, sizeof(tok));
+  snprintf(l2, sizeof(l2), "%s  %s tok", dur, tok);
+  M5.Lcd.setTextColor(CARD_TEXT_SEC, CARD_FILL);
+  M5.Lcd.setTextDatum(middle_left);
+  M5.Lcd.drawString(l2, x + pad, row2_y);
+
+  // Row 2 right — rolling rate-limit pressure.
+  char lim[24];
+  snprintf(lim, sizeof(lim), "5h %d%%  7d %d%%", g_limit_5h, g_limit_7d);
+  M5.Lcd.setTextDatum(middle_right);
+  M5.Lcd.drawString(lim, x + w - pad, row2_y);
 }
 
 // Tool chip = a small ACNH cream pill with a leading accent dot and
@@ -484,9 +531,14 @@ void paintStatusBarIfChanged() {
   bool    accent_dirty = (g_cur_state != g_accent_drawn);
   uint16_t accent      = accentForState(g_cur_state);
 
-  char combined[96];
-  snprintf(combined, sizeof(combined), "%d|%d|%lu|%s",
-           g_running, g_waiting, (unsigned long)g_tokens, g_tool);
+  // Dirty key for the tool chip (g_tool) + the HUD card metrics. R/W
+  // counters drive the bubble state, not the HUD, so they're not keyed
+  // here — accent_dirty already covers state changes.
+  char combined[128];
+  snprintf(combined, sizeof(combined), "%s|%d|%s|%lu|%lu|%d|%d|%lu",
+           g_tool, g_context_pct, g_model, (unsigned long)g_hud_tokens,
+           (unsigned long)g_session_ms, g_limit_5h, g_limit_7d,
+           (unsigned long)g_tokens);
   bool stats_dirty = (strncmp(combined, g_stats_drawn,
                               sizeof(g_stats_drawn)) != 0);
 
@@ -511,7 +563,7 @@ void paintStatusBarIfChanged() {
   }
 
   if (stats_dirty || accent_dirty) {
-    drawHud(g_running, g_waiting, g_tokens);
+    drawHud();
     drawToolChip(accent);
     strncpy(g_stats_drawn, combined, sizeof(g_stats_drawn) - 1);
     g_stats_drawn[sizeof(g_stats_drawn) - 1] = 0;
@@ -661,4 +713,16 @@ void characterSetStats(int running, int waiting, uint32_t tokens, const char* to
   if (!tool) tool = "";
   strncpy(g_tool, tool, sizeof(g_tool) - 1);
   g_tool[sizeof(g_tool) - 1] = 0;
+}
+
+void characterSetHud(int context_pct, const char* model, uint32_t tokens,
+                     int limit_5h, int limit_7d, uint32_t session_ms) {
+  g_context_pct = context_pct;
+  if (!model) model = "";
+  strncpy(g_model, model, sizeof(g_model) - 1);
+  g_model[sizeof(g_model) - 1] = 0;
+  g_hud_tokens = tokens;
+  g_limit_5h   = limit_5h;
+  g_limit_7d   = limit_7d;
+  g_session_ms = session_ms;
 }
