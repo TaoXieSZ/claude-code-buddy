@@ -28,3 +28,11 @@ void motionSetState(uint8_t state);
 
 // Drive the active pattern. Call every loop iteration.
 void motionTick();
+
+// Runtime config (dashboard-controlled, persisted in NVS by settings.cpp).
+// motionSetEnabled(false) parks the servos at home and halts pattern
+// playback — used for "quiet mode" desk-share scenarios.
+// motionSetIdleWiggle(false) replaces the IDLE pattern with a static
+// "stay at home" pattern, leaving all other states animated.
+void motionSetEnabled(bool on);
+void motionSetIdleWiggle(bool on);

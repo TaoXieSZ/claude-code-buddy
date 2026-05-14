@@ -30,6 +30,12 @@ enum CharState : uint8_t {
 // or missing pack. Pass nullptr to autodetect the first pack on disk.
 bool characterInit(const char* name);
 
+// Hot-swap the character pack at runtime. Re-runs characterInit
+// internals with a new pack name (or nullptr for autodetect), then
+// re-opens the GIF for the current state so the change is visible
+// immediately. Used by the dashboard's "character pack" dropdown.
+void characterReload(const char* name);
+
 // Switch active GIF. No-op when state unchanged. CHAR_BUSY picks a
 // random busy_N each call so repeated busy → animation variety.
 void characterSetState(uint8_t state);

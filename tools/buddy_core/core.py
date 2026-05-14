@@ -603,6 +603,7 @@ def run(
     on_connect_cb: Callable | None = None,
     extra_tasks: list[Callable] | None = None,
     log_fmt: Callable[[dict], str] | None = None,
+    on_loop_start: Callable | None = None,
 ) -> None:
     """Configure logging, wire everything up, and run the event loop.
 
@@ -681,6 +682,17 @@ def run(
 
         # Graceful shutdown
         loop = asyncio.get_running_loop()
+
+        # Optional sync init that needs both ble + the running loop —
+        # used by cc-bridge to start the localhost dashboard HTTP
+        # server. Called before the main tasks spin up so any HTTP
+        # client connecting at t=0 sees a functioning ble writer.
+        if on_loop_start:
+            try:
+                on_loop_start(ble, loop, log)
+            except Exception as e:
+                log.warning("on_loop_start failed (non-fatal): %s", e)
+
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)

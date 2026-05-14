@@ -70,11 +70,23 @@ const Step PAT_HEART[]     = {
   {-400,550, 200, 1200},
   {0, 0, 0, 0}
 };
+// "Quiet" pattern used when idle_wiggle is disabled. Single step that
+// just sits at home with a long re-arm so the servos never twitch.
+const Step PAT_IDLE_QUIET[] = {
+  {0, 450, 200, 60000},      // home, sit for a minute, loop
+  {0, 0, 0, 0}
+};
 
 const Step* PATTERNS[CHAR_N_STATES] = {
   PAT_SLEEP, PAT_IDLE, PAT_BUSY, PAT_ATTENTION,
   PAT_CELEBRATE, PAT_DIZZY, PAT_HEART,
 };
+
+// Runtime config — flipped by motionSetEnabled / motionSetIdleWiggle.
+// g_master_enabled = false halts all motion (parks at home once).
+// g_idle_wiggle = false swaps PAT_IDLE with PAT_IDLE_QUIET in lookup.
+bool g_master_enabled = true;
+bool g_idle_wiggle    = true;
 
 uint8_t       g_state    = 0xFF;
 const Step*   g_pattern  = nullptr;
@@ -100,13 +112,44 @@ void motionSetState(uint8_t state) {
   if (state >= CHAR_N_STATES) return;
   if (state == g_state) return;
   g_state   = state;
-  g_pattern = PATTERNS[state];
+  // PAT_IDLE_QUIET is swapped in dynamically when idle_wiggle is off.
+  if (state == CHAR_IDLE && !g_idle_wiggle) {
+    g_pattern = PAT_IDLE_QUIET;
+  } else {
+    g_pattern = PATTERNS[state];
+  }
   g_step_i  = 0;
   g_next_at = 0;   // fire next step on this tick
   g_running = (g_pattern != nullptr);
 }
 
+void motionSetEnabled(bool on) {
+  g_master_enabled = on;
+  if (!on) {
+    // Park and stop. Servos stay powered (so they hold home), pattern
+    // playback halts.
+    ::M5StackChan.Motion.goHome();
+    g_running = false;
+  } else if (g_state < CHAR_N_STATES) {
+    // Resume: recompute pattern for current state.
+    motionSetState((uint8_t)(g_state ^ 0xFF));  // force-mismatch
+    motionSetState(g_state);
+  }
+}
+
+void motionSetIdleWiggle(bool on) {
+  g_idle_wiggle = on;
+  // If currently in IDLE, re-pick the pattern immediately.
+  if (g_state == CHAR_IDLE) {
+    g_pattern = on ? PAT_IDLE : PAT_IDLE_QUIET;
+    g_step_i  = 0;
+    g_next_at = 0;
+    g_running = true;
+  }
+}
+
 void motionTick() {
+  if (!g_master_enabled) return;
   if (!g_running || !g_pattern) return;
   uint32_t now = millis();
   if (now < g_next_at) return;

@@ -358,6 +358,37 @@ void characterTick() {
   g_next_frame_at = now + delayMs;
 }
 
+void characterReload(const char* name) {
+  // Close current GIF so the next openStateGif gets a clean slate.
+  // characterInit re-mounts LittleFS (no-op since already mounted),
+  // sets g_base to the new path, refreshes bg color from manifest.
+  // We then force state change by clearing g_cur_state so the next
+  // characterSetState reloads the GIF even if the state matches.
+  // Skip if name is the same — avoids unnecessary flicker.
+  char want[48];
+  snprintf(want, sizeof(want), "/characters/%s", name ? name : "");
+  if (name && strcmp(g_base, want) == 0) {
+    Serial.printf("[char] reload skipped: already on %s\n", g_base);
+    return;
+  }
+  // Stop any in-flight GIF before changing g_base.
+  if (g_gif_open) {
+    g_gif.close();
+    g_gif_open = false;
+  }
+  uint8_t was = g_cur_state;
+  g_cur_state = 0xFF;
+  if (!characterInit(name)) {
+    Serial.println("[char] reload init failed");
+    return;
+  }
+  if (was < CHAR_N_STATES) {
+    characterSetState(was);
+  } else {
+    characterSetState(CHAR_SLEEP);
+  }
+}
+
 void characterSetMsg(const char* msg) {
   if (!msg) msg = "";
   strncpy(g_msg, msg, sizeof(g_msg) - 1);

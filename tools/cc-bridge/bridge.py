@@ -32,9 +32,12 @@ import sys
 import time
 import pathlib
 
-# Allow `from buddy_core import ...` when launched as a standalone script.
+# Allow `from buddy_core import ...` AND `from dashboard import ...`
+# when launched as a standalone script via launchd (where cwd ≠ here).
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from buddy_core import run, BuddyState
+from dashboard import start_dashboard, DEFAULT_PORT as DASH_DEFAULT_PORT
 
 # ─── config ────────────────────────────────────────────────────────────
 SOCKET_PATH = os.environ.get("CC_BRIDGE_SOCKET", "/tmp/cc-bridge.sock")
@@ -181,6 +184,18 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
 
 
 if __name__ == "__main__":
+    # Dashboard port: env var CC_BRIDGE_DASH_PORT overrides; 0 disables.
+    # Default DEFAULT_PORT (8765) is fine on macOS where launchd doesn't
+    # share that range with system services. Bound to 127.0.0.1 only —
+    # don't expose the speaker/screen remote-control to the network.
+    DASH_PORT = int(os.environ.get("CC_BRIDGE_DASH_PORT", str(DASH_DEFAULT_PORT)))
+
+    def _on_loop_start(ble, loop, log):
+        if DASH_PORT > 0:
+            start_dashboard(ble, loop, log=log, port=DASH_PORT)
+        else:
+            log.info("dashboard disabled (CC_BRIDGE_DASH_PORT=0)")
+
     run(
         name="cc-bridge",
         socket_path=SOCKET_PATH,
@@ -191,4 +206,5 @@ if __name__ == "__main__":
         ptt_mode=PTT_MODE,
         keepalive_s=10.0,
         rtc_sync_on_connect=False,  # Claude Desktop handles RTC for cc-bridge
+        on_loop_start=_on_loop_start,
     )

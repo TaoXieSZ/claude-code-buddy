@@ -34,6 +34,7 @@
 #include "character_chan.h"
 #include "sound.h"
 #include "motion.h"
+#include "settings.h"
 
 // 2026-05-13: m5avatar dropped in favor of the Plus2 Clawd/Calico GIFs —
 // user wants visual continuity with the stick UX, and character_chan.cpp
@@ -124,6 +125,37 @@ static void applyJsonLine(const char* line) {
   // missing the sound entirely.
   const char* play = doc["play"] | (const char*)nullptr;
   if (play && *play) soundPlay(play);
+
+  // Dashboard settings cmds — daemon forwards POSTs from the web UI as
+  // {"cmd":"vol","v":N} / "bright" / "char" / "motion" / "idle_wiggle".
+  // Each setter persists to NVS and applies immediately. Returning
+  // after a settings cmd means the rest of applyJsonLine (state map,
+  // status bar repaint) is skipped — keeps cmds idempotent and avoids
+  // a spurious state flip from a settings frame that has no msg field.
+  const char* cmd = doc["cmd"] | (const char*)nullptr;
+  if (cmd && *cmd) {
+    if (strcmp(cmd, "vol") == 0) {
+      settingsSetVolume((uint8_t)(int)(doc["v"] | 96));
+      return;
+    }
+    if (strcmp(cmd, "bright") == 0) {
+      settingsSetBrightness((uint8_t)(int)(doc["v"] | 200));
+      return;
+    }
+    if (strcmp(cmd, "char") == 0) {
+      const char* n = doc["name"] | "";
+      if (*n) settingsSetCharName(n);
+      return;
+    }
+    if (strcmp(cmd, "motion") == 0) {
+      settingsSetMotionEnabled(doc["enabled"] | true);
+      return;
+    }
+    if (strcmp(cmd, "idle_wiggle") == 0) {
+      settingsSetIdleWiggleEnabled(doc["enabled"] | true);
+      return;
+    }
+  }
 
   bool is_done = false;
   uint8_t next = mapState(doc, &is_done);
@@ -285,13 +317,22 @@ void setup() {
   delay(200);
   Serial.println("\n[boot] StackChan buddy firmware");
 
-  // Build flag BUDDY_DEFAULT_CHAR (optional) picks the pack; otherwise
-  // autodetect — first /characters/<dir> on LittleFS wins.
+  // Settings come from NVS (Preferences). Load early so brightness +
+  // volume are correct from the first paint/play. character/motion
+  // configuration gets applied later, after those subsystems init.
+  settingsInit();
+
+  // Character pack pick order: NVS-stored name → build-flag default →
+  // autodetect first /characters/<dir>.
+  const char* char_name = settingsGetCharName();
+  if (!char_name || !*char_name) {
 #ifdef BUDDY_DEFAULT_CHAR
-  characterInit(BUDDY_DEFAULT_CHAR);
+    char_name = BUDDY_DEFAULT_CHAR;
 #else
-  characterInit(nullptr);
+    char_name = nullptr;
 #endif
+  }
+  characterInit(char_name);
   characterSetState(CHAR_SLEEP);
   characterSetMsg("waking up...");
 
@@ -304,6 +345,8 @@ void setup() {
   // up the servo rail and homes both axes. Conservative move speeds in
   // motion.cpp keep peak current within USB-only budget.
   motionInit();
+  motionSetEnabled(settingsGetMotionEnabled());
+  motionSetIdleWiggle(settingsGetIdleWiggleEnabled());
 
   bleStart();
 }
