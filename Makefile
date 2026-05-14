@@ -11,10 +11,12 @@
 # which does both in one shot.
 
 PIO ?= pio
+PYTEST ?= pytest
 
 .PHONY: flash-cursor flash-cursor-fw flash-cursor-fs \
         flash-claude flash-claude-fw flash-claude-fs \
-        monitor-cursor monitor-claude scan-sticks help
+        monitor-cursor monitor-claude scan-sticks help \
+        test test-py test-cpp
 
 help:
 	@echo "Two-stick flash + monitor convenience targets:"
@@ -28,8 +30,19 @@ help:
 	@echo "  make monitor-claude      pio device monitor on claude stick"
 	@echo "  make scan-sticks         list attached USB serial devices"
 	@echo ""
+	@echo "Tests:"
+	@echo "  make test                pytest + native C++ unit tests"
+	@echo "  make test-py             pytest (Python daemons)"
+	@echo "  make test-cpp            pio test -e native (pure C++ logic)"
+	@echo ""
 	@echo "Character pack staging is separate — use:"
 	@echo "  python3 tools/flash_character.py characters/calico --env cursor"
+
+# Run both suites. Python deps: pip install -e ".[dev]" (see docs/development.md).
+test: test-py test-cpp
+
+test-py:  ; $(PYTEST) -q
+test-cpp: ; $(PIO) test -e native
 
 flash-cursor:    ; $(PIO) run -e m5stickc-plus2-cursor -t upload -t uploadfs
 flash-cursor-fw: ; $(PIO) run -e m5stickc-plus2-cursor -t upload
