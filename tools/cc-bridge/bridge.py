@@ -174,6 +174,16 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             if msg:
                 state.msg = msg[:120]
                 state.add_entry(msg)
+                # "Claude is waiting for your input" means the assistant
+                # turn ended and Claude is idle-waiting — semantically a
+                # Stop. Without clearing the session's running flag the
+                # stale running count makes firmware mapState() show
+                # BUSY while the bubble says "waiting for your input".
+                if "waiting for your input" in msg.lower():
+                    s = state._sessions.get(sid)
+                    if s and s.get("running"):
+                        s["running"] = False
+                        state.running = max(0, state.running - 1)
                 changed = True
 
     elif name == "PostCompact":
