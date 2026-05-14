@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>StackChan monitor — watchOS redesign preview</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #111;
+    --text-pri: #fff;
+    --text-sec: #8E8E93;
+    --text-caps: #6B6B6D;
+    --card-fill: #1C1C1E;
+    --card-div: #2A2A2C;
+    --orange: #FF9500;
+    --red: #FF453A;
+    --green: #34C759;
+    --yellow: #FFD60A;
+    --grey: #6B6B6D;
+    --face-tint: #1a1a1d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 24px 80px;
+    background: var(--bg);
+    color: var(--text-pri);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+          "Helvetica Neue", Arial, sans-serif;
+  }
+  h1 {
+    font: 600 24px/1.2 -apple-system, "SF Pro Display", Arial, sans-serif;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .sub {
+    color: var(--text-sec);
+    margin: 0 0 32px;
+    font-size: 13px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(680px, 1fr));
+    gap: 32px;
+    max-width: 1500px;
+    margin: 0 auto;
+  }
+  .cell {
+    background: var(--panel);
+    border-radius: 16px;
+    padding: 20px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset;
+  }
+  .cell-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .cell-title {
+    font: 600 13px/1 "SF Pro Text", sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .cell-note {
+    color: var(--text-sec);
+    font-size: 12px;
+  }
+
+  /* The actual device screen — 320x240, scaled 2x for legibility. */
+  .screen {
+    width: 640px;
+    height: 480px;
+    background: #000;
+    border-radius: 24px;
+    position: relative;
+    box-shadow: 0 0 0 8px #111, 0 12px 40px rgba(0,0,0,0.6);
+    overflow: hidden;
+    font: 13px/1 -apple-system, "SF Pro Text", sans-serif;
+  }
+  .screen-inner {
+    position: absolute;
+    inset: 0;
+    transform-origin: 0 0;
+    transform: scale(2);
+    width: 320px;
+    height: 240px;
+  }
+
+  /* HUD ------------------------------------------------------- */
+  .hud {
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    height: 38px;
+    padding: 2px 8px 0;
+    border-bottom: 1px solid var(--card-div);
+  }
+  .hud .row1 {
+    display: flex; justify-content: space-between;
+    color: var(--text-caps);
+    font: 700 8.5px/16px "SF Compact Text", -apple-system, sans-serif;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .hud .row2 {
+    display: flex; justify-content: space-between;
+    margin-top: 1px;
+    font: 700 12px/16px "SF Compact Text", -apple-system, sans-serif;
+  }
+  .hud .tokens {
+    color: var(--orange);   /* overridden per state */
+  }
+
+  /* Char box -------------------------------------------------- */
+  .face {
+    position: absolute;
+    left: 4px; top: 40px;
+    width: 176px; height: 196px;
+    border-radius: 8px;
+    background:
+      radial-gradient(circle at 50% 42%, var(--face-tint) 0%, #000 70%);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 56px;
+    color: #555;
+  }
+  .face .emoji { filter: grayscale(0.4) brightness(0.9); }
+
+  /* Bubble card ---------------------------------------------- */
+  .card {
+    position: absolute;
+    left: 184px; top: 44px;
+    width: 132px; height: 148px;
+    background: var(--card-fill);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .card-head {
+    height: 20px;
+    padding: 0 10px;
+    display: flex; align-items: center;
+    font: 700 10px/1 "SF Compact Text", -apple-system, sans-serif;
+    letter-spacing: 0.08em;
+    color: #000;
+  }
+  .card-divider {
+    height: 1px;
+    background: var(--card-div);
+  }
+  .card-body {
+    padding: 8px;
+    font: 700 10.5px/14px "SF Compact Text", -apple-system, sans-serif;
+    color: var(--text-pri);
+    height: calc(100% - 20px - 1px);
+    overflow: hidden;
+  }
+
+  /* Tool chip pill ------------------------------------------- */
+  .chip {
+    position: absolute;
+    left: 184px; top: 200px;
+    width: 132px; height: 32px;
+    background: var(--card-fill);
+    border-radius: 16px;
+    display: flex; align-items: center;
+    padding: 0 14px;
+    gap: 10px;
+  }
+  .chip-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+  }
+  .chip-name {
+    font: 700 10.5px/1 "SF Compact Text", -apple-system, sans-serif;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-pri);
+  }
+
+  /* State-driven accent colors (one var per cell) ------------- */
+  .cell[data-state="busy"]      { --accent: var(--orange); }
+  .cell[data-state="idle"]      { --accent: var(--green); }
+  .cell[data-state="attention"] { --accent: var(--red); }
+  .cell[data-state="celebrate"] { --accent: var(--yellow); }
+  .cell[data-state="sleep"]     { --accent: var(--grey); }
+  .cell .card-head { background: var(--accent); }
+  .cell .chip-dot  { background: var(--accent); }
+  .cell .hud .tokens { color: var(--accent); }
+
+  /* Spec sidebar --------------------------------------------- */
+  .legend {
+    max-width: 1500px;
+    margin: 48px auto 0;
+    padding: 24px;
+    background: var(--panel);
+    border-radius: 16px;
+  }
+  .legend h2 {
+    margin: 0 0 12px;
+    font: 600 14px/1 "SF Pro Text", sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-sec);
+  }
+  .legend dl {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 8px 24px;
+    margin: 0;
+    font-size: 13px;
+  }
+  .legend dt {
+    color: var(--text-sec);
+    font-feature-settings: "tnum";
+  }
+  .legend dd { margin: 0; }
+  .swatch {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    vertical-align: -1px;
+    margin-right: 6px;
+  }
+</style>
+</head>
+<body>
+
+<h1>StackChan monitor — watchOS redesign</h1>
+<p class="sub">
+  CoreS3 320×240 LCD shown 2× for legibility. Five states across the
+  same layout — only the accent (header strip / tokens / chip dot)
+  changes per state. Face area is a placeholder; real device runs the
+  GIF pack.
+</p>
+
+<div class="grid">
+
+  <div class="cell" data-state="busy">
+    <div class="cell-head">
+      <span class="cell-title">BUSY</span>
+      <span class="cell-note">Tool running, msg streaming</span>
+    </div>
+    <div class="screen"><div class="screen-inner">
+      <div class="hud">
+        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
+        <div class="row2"><span>R 2  W 0</span><span class="tokens">12.4k</span></div>
+      </div>
+      <div class="face"><span class="emoji">🐾</span></div>
+      <div class="card">
+        <div class="card-head">BUSY</div>
+        <div class="card-divider"></div>
+        <div class="card-body">listing project files for review…</div>
+      </div>
+      <div class="chip">
+        <span class="chip-dot"></span>
+        <span class="chip-name">BASH</span>
+      </div>
+    </div></div>
+  </div>
+
+  <div class="cell" data-state="attention">
+    <div class="cell-head">
+      <span class="cell-title">ATTENTION</span>
+      <span class="cell-note">Approval / prompt waiting</span>
+    </div>
+    <div class="screen"><div class="screen-inner">
+      <div class="hud">
+        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
+        <div class="row2"><span>R 0  W 1</span><span class="tokens">8.2k</span></div>
+      </div>
+      <div class="face"><span class="emoji">❗</span></div>
+      <div class="card">
+        <div class="card-head">ATTN</div>
+        <div class="card-divider"></div>
+        <div class="card-body">approve: run npm install in /Users/txie/foo?</div>
+      </div>
+      <div class="chip">
+        <span class="chip-dot"></span>
+        <span class="chip-name">APPROVE</span>
+      </div>
+    </div></div>
+  </div>
+
+  <div class="cell" data-state="idle">
+    <div class="cell-head">
+      <span class="cell-title">IDLE</span>
+      <span class="cell-note">Connected, nothing running</span>
+    </div>
+    <div class="screen"><div class="screen-inner">
+      <div class="hud">
+        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
+        <div class="row2"><span>R 0  W 0</span><span class="tokens">12.4k</span></div>
+      </div>
+      <div class="face"><span class="emoji">😺</span></div>
+      <div class="card">
+        <div class="card-head">IDLE</div>
+        <div class="card-divider"></div>
+        <div class="card-body">ready</div>
+      </div>
+      <div class="chip" style="visibility:hidden"></div>
+    </div></div>
+  </div>
+
+  <div class="cell" data-state="celebrate">
+    <div class="cell-head">
+      <span class="cell-title">CELEBRATE</span>
+      <span class="cell-note">"done: …" — held 1.5s</span>
+    </div>
+    <div class="screen"><div class="screen-inner">
+      <div class="hud">
+        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
+        <div class="row2"><span>R 0  W 0</span><span class="tokens">13.1k</span></div>
+      </div>
+      <div class="face"><span class="emoji">🎉</span></div>
+      <div class="card">
+        <div class="card-head">DONE</div>
+        <div class="card-divider"></div>
+        <div class="card-body">done: bash exited 0</div>
+      </div>
+      <div class="chip">
+        <span class="chip-dot"></span>
+        <span class="chip-name">BASH</span>
+      </div>
+    </div></div>
+  </div>
+
+  <div class="cell" data-state="sleep">
+    <div class="cell-head">
+      <span class="cell-title">SLEEP</span>
+      <span class="cell-note">20s silence — daemon idle</span>
+    </div>
+    <div class="screen"><div class="screen-inner">
+      <div class="hud">
+        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
+        <div class="row2"><span>R 0  W 0</span><span class="tokens">12.4k</span></div>
+      </div>
+      <div class="face"><span class="emoji">💤</span></div>
+      <div class="card">
+        <div class="card-head">SLEEP</div>
+        <div class="card-divider"></div>
+        <div class="card-body" style="color:var(--text-sec)">…</div>
+      </div>
+      <div class="chip" style="visibility:hidden"></div>
+    </div></div>
+  </div>
+
+</div>
+
+<section class="legend">
+  <h2>Spec</h2>
+  <dl>
+    <dt>Canvas</dt>            <dd>320 × 240, rotation 1 (landscape), pure black (#000000)</dd>
+    <dt>HUD bar</dt>           <dd>0,0 → 320,38 · two-row · grey caps labels + bold values · tokens in state accent</dd>
+    <dt>Face box</dt>          <dd>4,40 → 180,236 (176 × 196) · GIF fit-into-box scaler</dd>
+    <dt>Bubble card</dt>       <dd>184,44 → 316,192 (132 × 148) · r=14 · fill <span class="swatch" style="background:#1C1C1E"></span>#1C1C1E · accent header strip 20px with caps state label</dd>
+    <dt>Tool chip</dt>         <dd>184,200 → 316,232 (132 × 32) · full pill r=16 · dark fill + accent dot + uppercase tool name</dd>
+    <dt>Accents</dt>           <dd>
+      <span class="swatch" style="background:#FF453A"></span>red ATTN ·
+      <span class="swatch" style="background:#FF9500"></span>orange BUSY ·
+      <span class="swatch" style="background:#34C759"></span>green IDLE ·
+      <span class="swatch" style="background:#FFD60A"></span>yellow DONE ·
+      <span class="swatch" style="background:#6B6B6D"></span>grey SLEEP
+    </dd>
+    <dt>Typography</dt>        <dd>HUD caps Font2 · HUD values FreeSansBold9pt · card body FreeSansBold9pt · chip FreeSansBold9pt all-caps</dd>
+  </dl>
+</section>
+
+</body>
+</html>

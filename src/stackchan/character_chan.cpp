@@ -21,27 +21,76 @@
 namespace {
 
 // --- Geometry --------------------------------------------------------------
-// 2026-05-14 layout — character LEFT, msg panel RIGHT, stats BOTTOM:
-//   +----------------+--------------------+
-//   | character box  | msg word-wrap      |
-//   | 130 × 144      | 170 × 156          |
-//   +----------------+--------------------+
-//   |  stats bar (full width, 72 tall)    |
-//   +-------------------------------------+
-// Pre-redesign the character was centered at TARGET_H=170 and left
-// wide bands of empty pixels on both sides; msg was a single clipped
-// line. Now those sides are an actual text panel with word-wrap.
-constexpr int  CHAR_BOX_X    = 8;
-constexpr int  CHAR_BOX_Y    = 12;
-constexpr int  CHAR_BOX_W    = 130;
-constexpr int  CHAR_BOX_H    = 144;
-constexpr int  TEXT_PANEL_X  = 146;
-constexpr int  TEXT_PANEL_Y  = 10;
-constexpr int  TEXT_PANEL_W  = 170;   // 320 - 146 - 4 right margin
-constexpr int  TEXT_PANEL_H  = 152;
-constexpr int  STATS_BAR_Y   = 168;
-constexpr int  STATS_BAR_H   = 72;    // ends at y=240
-constexpr int  STATUS_PAD_X  = 6;
+// 2026-05-14 layout v2 — face-first, speech bubble:
+//   ┌── HUD bar 20px ─────────────────────────┐
+//   │ R:N W:N                       tok:Nk    │
+//   ├────────────────────────┬────────────────┤
+//   │                        │  speech bubble │
+//   │     GIF face           │◀ rounded, tail │
+//   │     180 × 212          │  msg wrap      │
+//   │                        ├────────────────┤
+//   │                        │  tool chip     │
+//   └────────────────────────┴────────────────┘
+// Reasons over v1: face is the personality — give it the dominant
+// area (was 130×144, now 180×212). The right column becomes a true
+// bubble + tool chip pair, with state-coloured border so the
+// glance-test answer "what is Claude doing?" works without reading
+// the msg. HUD on top frees the bottom for full-height bubble.
+// watchOS-leaning palette: pure black canvas, dark "card" surfaces,
+// vibrant accent for the active state. Screen bg is forced to black
+// regardless of manifest — manifest bg still drives GIF transparency
+// inside CHAR_BOX so per-character backgrounds work as before.
+constexpr uint16_t SCREEN_BG   = 0x0000;   // #000000
+constexpr uint16_t CARD_FILL   = 0x18C3;   // #1C1C1E (Apple Watch card)
+constexpr uint16_t CARD_DIV    = 0x2965;   // #2A2A2C
+constexpr uint16_t TEXT_PRI    = 0xFFFF;   // white
+constexpr uint16_t TEXT_SEC    = 0x8C71;   // #8E8E93 secondary label grey
+constexpr uint16_t TEXT_CAPS   = 0x6B4D;   // #6B6B6D tiny caps label
+
+constexpr int  HUD_Y         = 0;
+constexpr int  HUD_H         = 38;
+constexpr int  HUD_PAD_X     = 8;
+constexpr int  CHAR_BOX_X    = 4;
+constexpr int  CHAR_BOX_Y    = 40;
+constexpr int  CHAR_BOX_W    = 176;
+constexpr int  CHAR_BOX_H    = 196;
+constexpr int  BUBBLE_X      = 184;
+constexpr int  BUBBLE_Y      = 44;
+constexpr int  BUBBLE_W      = 132;
+constexpr int  BUBBLE_H      = 148;
+constexpr int  BUBBLE_R      = 14;
+constexpr int  BUBBLE_PAD    = 8;
+constexpr int  BUBBLE_HEAD_H = 20;   // top status strip inside card
+constexpr int  TOOL_CHIP_X   = 184;
+constexpr int  TOOL_CHIP_Y   = 200;
+constexpr int  TOOL_CHIP_W   = 132;
+constexpr int  TOOL_CHIP_H   = 32;
+constexpr int  TOOL_CHIP_R   = 16;   // full-pill radius (= h/2)
+
+// State → accent colour for the bubble header strip and the dot in
+// the chip. red=act, orange=busy, green=ok, yellow=done, grey=asleep.
+uint16_t accentForState(uint8_t s) {
+  switch (s) {
+    case 3 /*CHAR_ATTENTION*/: return 0xFA28;   // #FF453A
+    case 2 /*CHAR_BUSY*/:      return 0xFCA0;   // #FF9500
+    case 1 /*CHAR_IDLE*/:      return 0x36A8;   // #34C759
+    case 4 /*CHAR_CELEBRATE*/: return 0xFEC1;   // #FFD60A
+    case 0 /*CHAR_SLEEP*/:     return 0x6B4D;   // #6B6B6D
+    default:                   return 0xFFFF;
+  }
+}
+const char* labelForState(uint8_t s) {
+  switch (s) {
+    case 0: return "SLEEP";
+    case 1: return "IDLE";
+    case 2: return "BUSY";
+    case 3: return "ATTN";
+    case 4: return "DONE";
+    case 5: return "ERR";
+    case 6: return "<3";
+    default: return "";
+  }
+}
 
 // --- File mapping ----------------------------------------------------------
 const char* STATE_FILES[CHAR_N_STATES] = {
@@ -283,62 +332,160 @@ void drawWrapped(const char* text, int x, int y, int max_w,
 }
 
 // --- Status paint -----------------------------------------------------------
-// Two regions, each repainted lazily on dirty check:
-//   TEXT_PANEL — right side, msg with word-wrap, FreeSansBold12pt
-//   STATS_BAR  — bottom, R/W/tokens + active tool, FreeSans12pt centered
-void paintStatusBarIfChanged() {
-  bool msg_dirty = (strncmp(g_msg, g_msg_drawn, sizeof(g_msg)) != 0);
+// Three regions, each repainted lazily on dirty check:
+//   HUD       — top 20px strip, R/W/tokens, FreeSans9pt light grey
+//   BUBBLE    — right speech bubble, msg word-wrap, FreeSansBold9pt,
+//               border colour driven by current state
+//   TOOL_CHIP — below bubble, orange pill with current tool name
+// border state dirty bit tracks the last colour painted so a state
+// change repaints the bubble outline without forcing a full text
+// repaint.
+uint8_t      g_accent_drawn = 0xFF;   // last state painted to bubble header
 
-  // Build the stats string into a stable buffer.
-  char stats_now[80];
-  if (g_tokens >= 1000) {
-    snprintf(stats_now, sizeof(stats_now), "R:%d  W:%d  tok:%lu.%luk%s%s",
-             g_running, g_waiting,
-             (unsigned long)(g_tokens / 1000),
-             (unsigned long)((g_tokens / 100) % 10),
-             g_tool[0] ? "  " : "",
-             g_tool);
+// watchOS card: rounded dark surface + thin accent strip across the
+// top with a CAPS state label, sitting on pure-black canvas. No tail
+// — Apple Watch cards float; no border line either, contrast comes
+// from the fill darker than canvas.
+void drawBubbleCard(uint16_t accent, const char* state_label) {
+  M5.Lcd.fillRoundRect(BUBBLE_X, BUBBLE_Y, BUBBLE_W, BUBBLE_H,
+                       BUBBLE_R, CARD_FILL);
+  // Header strip — rounded at top (matches card), square at bottom.
+  // Paint rounded rect first (gives the top corners), then a plain
+  // rect over the lower portion gives the square bottom edge.
+  M5.Lcd.fillRoundRect(BUBBLE_X, BUBBLE_Y, BUBBLE_W, BUBBLE_HEAD_H,
+                       BUBBLE_R, accent);
+  M5.Lcd.fillRect(BUBBLE_X, BUBBLE_Y + BUBBLE_R,
+                  BUBBLE_W, BUBBLE_HEAD_H - BUBBLE_R, accent);
+  // Hairline divider beneath the strip.
+  M5.Lcd.drawFastHLine(BUBBLE_X + 1, BUBBLE_Y + BUBBLE_HEAD_H,
+                       BUBBLE_W - 2, CARD_DIV);
+
+  // State label, all caps, black on accent for high contrast.
+  M5.Lcd.setTextColor(SCREEN_BG, accent);
+  M5.Lcd.setTextDatum(middle_left);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
+  M5.Lcd.drawString(state_label,
+                    BUBBLE_X + 10,
+                    BUBBLE_Y + BUBBLE_HEAD_H / 2);
+}
+
+// HUD: two rows on a black bar.
+//   row 1 (caps grey label "ACTIVITY"  ……  "TOKENS"-rt)
+//   row 2 (white bold "R 2 · W 0"      ……  "12.4k"-rt accent)
+void drawHud(int running, int waiting, uint32_t tokens, uint16_t accent) {
+  M5.Lcd.fillRect(0, HUD_Y, M5.Lcd.width(), HUD_H, SCREEN_BG);
+
+  M5.Lcd.setTextColor(TEXT_CAPS, SCREEN_BG);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setFont(&fonts::Font2);   // small caps-friendly bitmap font
+  M5.Lcd.setTextDatum(top_left);
+  M5.Lcd.drawString("ACTIVITY", HUD_PAD_X, HUD_Y + 2);
+  M5.Lcd.setTextDatum(top_right);
+  M5.Lcd.drawString("TOKENS",
+                    M5.Lcd.width() - HUD_PAD_X, HUD_Y + 2);
+
+  char left[24];
+  snprintf(left, sizeof(left), "R %d  W %d", running, waiting);
+  M5.Lcd.setTextColor(TEXT_PRI, SCREEN_BG);
+  M5.Lcd.setTextDatum(top_left);
+  M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
+  M5.Lcd.drawString(left, HUD_PAD_X, HUD_Y + 16);
+
+  char right[16];
+  if (tokens >= 1000) {
+    snprintf(right, sizeof(right), "%lu.%luk",
+             (unsigned long)(tokens / 1000),
+             (unsigned long)((tokens / 100) % 10));
   } else {
-    snprintf(stats_now, sizeof(stats_now), "R:%d  W:%d  tok:%lu%s%s",
-             g_running, g_waiting, (unsigned long)g_tokens,
-             g_tool[0] ? "  " : "",
-             g_tool);
+    snprintf(right, sizeof(right), "%lu", (unsigned long)tokens);
   }
-  bool stats_dirty = (strncmp(stats_now, g_stats_drawn, sizeof(g_stats_drawn)) != 0);
+  M5.Lcd.setTextColor(accent, SCREEN_BG);
+  M5.Lcd.setTextDatum(top_right);
+  M5.Lcd.drawString(right, M5.Lcd.width() - HUD_PAD_X, HUD_Y + 16);
 
-  if (!msg_dirty && !stats_dirty) return;
+  // Hairline divider at very bottom of HUD.
+  M5.Lcd.drawFastHLine(0, HUD_Y + HUD_H - 1, M5.Lcd.width(), CARD_DIV);
+}
 
-  if (msg_dirty) {
-    M5.Lcd.fillRect(TEXT_PANEL_X, TEXT_PANEL_Y,
-                    TEXT_PANEL_W, TEXT_PANEL_H, g_bg);
-    M5.Lcd.setTextColor(TFT_WHITE, g_bg);
+// Full-pill chip, dark surface with a leading accent dot.
+void drawToolChip(uint16_t accent) {
+  if (!g_tool[0]) {
+    M5.Lcd.fillRect(TOOL_CHIP_X, TOOL_CHIP_Y,
+                    TOOL_CHIP_W, TOOL_CHIP_H, SCREEN_BG);
+    return;
+  }
+  M5.Lcd.fillRoundRect(TOOL_CHIP_X, TOOL_CHIP_Y,
+                       TOOL_CHIP_W, TOOL_CHIP_H, TOOL_CHIP_R, CARD_FILL);
+  // Leading dot.
+  int dot_cx = TOOL_CHIP_X + 14;
+  int dot_cy = TOOL_CHIP_Y + TOOL_CHIP_H / 2;
+  M5.Lcd.fillCircle(dot_cx, dot_cy, 4, accent);
+
+  // Uppercase the tool name for the SF Caps feel.
+  char buf[24];
+  size_t n = 0;
+  for (const char* p = g_tool; *p && n < sizeof(buf) - 1; p++, n++) {
+    char c = *p;
+    if (c >= 'a' && c <= 'z') c -= 32;
+    buf[n] = c;
+  }
+  buf[n] = 0;
+
+  M5.Lcd.setTextColor(TEXT_PRI, CARD_FILL);
+  M5.Lcd.setTextDatum(middle_left);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
+  int text_x      = dot_cx + 10;
+  int text_max_w  = TOOL_CHIP_X + TOOL_CHIP_W - 12 - text_x;
+  while (M5.Lcd.textWidth(buf) > text_max_w && strlen(buf) > 1) {
+    size_t L = strlen(buf);
+    buf[L - 1] = 0;
+    if (L >= 2) buf[L - 2] = '.';
+    if (L >= 3) buf[L - 3] = '.';
+  }
+  M5.Lcd.drawString(buf, text_x, TOOL_CHIP_Y + TOOL_CHIP_H / 2);
+}
+
+void paintStatusBarIfChanged() {
+  bool    msg_dirty    = (strncmp(g_msg, g_msg_drawn, sizeof(g_msg)) != 0);
+  bool    accent_dirty = (g_cur_state != g_accent_drawn);
+  uint16_t accent      = accentForState(g_cur_state);
+
+  char combined[96];
+  snprintf(combined, sizeof(combined), "%d|%d|%lu|%s",
+           g_running, g_waiting, (unsigned long)g_tokens, g_tool);
+  bool stats_dirty = (strncmp(combined, g_stats_drawn,
+                              sizeof(g_stats_drawn)) != 0);
+
+  if (!msg_dirty && !stats_dirty && !accent_dirty) return;
+
+  if (msg_dirty || accent_dirty) {
+    drawBubbleCard(accent, labelForState(g_cur_state));
+    M5.Lcd.setTextColor(TEXT_PRI, CARD_FILL);
     M5.Lcd.setTextDatum(top_left);
     M5.Lcd.setTextSize(1);
-    M5.Lcd.setFont(&fonts::FreeSansBold12pt7b);
-    // 22 px per line accommodates the 18 px FreeSansBold12pt7b glyph
-    // box plus ~4 px of leading. 6 lines × 22 = 132 px, fits inside
-    // TEXT_PANEL_H=152.
-    drawWrapped(g_msg, TEXT_PANEL_X + 2, TEXT_PANEL_Y + 2,
-                TEXT_PANEL_W - 4, /*line_h=*/22, /*max_lines=*/6);
+    M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
+    // Body area starts below the header strip.
+    int body_y = BUBBLE_Y + BUBBLE_HEAD_H + BUBBLE_PAD;
+    int body_h = BUBBLE_H - BUBBLE_HEAD_H - 2 * BUBBLE_PAD;
+    int max_lines = body_h / 16;   // line_h=16 → 7 lines in 112px
+    drawWrapped(g_msg,
+                BUBBLE_X + BUBBLE_PAD, body_y,
+                BUBBLE_W - 2 * BUBBLE_PAD,
+                /*line_h=*/16, max_lines);
     strncpy(g_msg_drawn, g_msg, sizeof(g_msg_drawn) - 1);
     g_msg_drawn[sizeof(g_msg_drawn) - 1] = 0;
   }
 
-  if (stats_dirty) {
-    M5.Lcd.fillRect(0, STATS_BAR_Y, M5.Lcd.width(), STATS_BAR_H, g_bg);
-    // Thin top divider so the stats bar reads as a distinct region.
-    M5.Lcd.drawFastHLine(0, STATS_BAR_Y, M5.Lcd.width(), TFT_DARKGREY);
-    M5.Lcd.setTextColor(TFT_LIGHTGREY, g_bg);
-    M5.Lcd.setTextDatum(middle_left);
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.setFont(&fonts::FreeSans12pt7b);
-    M5.Lcd.drawString(stats_now, STATUS_PAD_X,
-                      STATS_BAR_Y + STATS_BAR_H / 2);
-    strncpy(g_stats_drawn, stats_now, sizeof(g_stats_drawn) - 1);
+  if (stats_dirty || accent_dirty) {
+    drawHud(g_running, g_waiting, g_tokens, accent);
+    drawToolChip(accent);
+    strncpy(g_stats_drawn, combined, sizeof(g_stats_drawn) - 1);
     g_stats_drawn[sizeof(g_stats_drawn) - 1] = 0;
   }
 
-  // Restore default font so any drawString elsewhere doesn't inherit.
+  g_accent_drawn = g_cur_state;
   M5.Lcd.setFont(&fonts::Font0);
 }
 
@@ -395,9 +542,13 @@ bool characterInit(const char* name) {
     }
     mf.close();
   }
+  // Force black canvas for the watchOS look. g_bg still drives GIF
+  // transparency inside CHAR_BOX, but the screen padding is always
+  // pure black so the dark cards float on it.
+  g_bg = SCREEN_BG;
 
   M5.Lcd.setRotation(1);
-  M5.Lcd.fillScreen(g_bg);
+  M5.Lcd.fillScreen(SCREEN_BG);
 
   g_gif.begin(GIF_PALETTE_RGB565_BE);
   return true;
