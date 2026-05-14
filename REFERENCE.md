@@ -55,6 +55,11 @@ a keepalive every 10 seconds:
   "entries": ["10:42 git push", "10:41 yarn test", "10:39 reading file..."],
   "tokens": 184502,
   "tokens_today": 31200,
+  "context_pct": 62,
+  "model": "Opus 4.7",
+  "limit_5h": 38,
+  "limit_7d": 13,
+  "session_ms": 754000,
   "prompt": {
     "id": "req_abc123",
     "tool": "Bash",
@@ -72,7 +77,30 @@ a keepalive every 10 seconds:
 | `entries`      | Recent transcript lines, newest first (capped to a few)                           |
 | `tokens`       | Cumulative output tokens since the desktop app started                            |
 | `tokens_today` | Output tokens since local midnight (persisted, survives restart)                  |
+| `context_pct`  | Context window used %, 0 if unknown (HUD metrics — see below)                      |
+| `model`        | Active model display name, "" if unknown                                          |
+| `limit_5h`     | Rolling 5-hour rate-limit used %                                                  |
+| `limit_7d`     | Rolling 7-day rate-limit used %                                                   |
+| `session_ms`   | Session elapsed time in milliseconds                                              |
 | `prompt`       | Only present when a permission decision is needed. The `id` is what you echo back |
+
+The `context_pct` / `model` / `limit_*` / `session_ms` fields are **HUD
+metrics**. The desktop apps don't send them; in this repo they're populated by
+`tools/cc-bridge/statusline_hud.py`, a statusline proxy that taps Claude Code's
+statusline stdin (which carries the context window, rate limits, and model) and
+fire-forwards a `{"hook_event_name":"hud", ...}` event to the cc-bridge socket.
+To enable it, point `statusLine.command` in `~/.claude/settings.json` at the
+proxy — it chains to the real OMC HUD, so the terminal statusline is unchanged:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "python3 /path/to/claude-desktop-buddy/tools/cc-bridge/statusline_hud.py"
+}
+```
+
+A consumer that doesn't care about HUD metrics can ignore these fields; they
+default to `0` / `""`.
 
 A few useful derived signals: `running > 0` means at least one session is
 actively generating, `waiting > 0` means a permission prompt is blocking,
