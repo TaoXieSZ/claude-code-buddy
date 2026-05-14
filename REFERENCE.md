@@ -5,6 +5,10 @@ You don't need anything from this repository to implement it. Any device
 that can advertise the Nordic UART Service and parse newline-delimited JSON
 will work: Arduino, ESP32, nRF52, a Raspberry Pi with a BLE dongle.
 
+> This file is the **external** wire-protocol contract. For **internal**
+> implementation behaviour (how the bridge daemons map IDE hook events onto
+> state, the firmware state machine, etc.) see `openspec/specs/`.
+
 ## Enabling the bridge
 
 The BLE bridge is off by default. In Claude for macOS or Windows:

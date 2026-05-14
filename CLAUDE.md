@@ -121,6 +121,24 @@ launchctl load ~/Library/LaunchAgents/com.cc-bridge.plist
 tail -f ~/Library/Logs/cc-bridge.err.log
 ```
 
+## Specs & tests
+
+- **`openspec/specs/`** — source of truth for *internal behaviour*, organised by
+  domain (e.g. `daemon-event-mapping`). Managed with OpenSpec (`/opsx:propose`,
+  `/opsx:apply`, `/opsx:archive`; CLI: `npx @fission-ai/openspec`). Behaviour
+  changes to `apply_event` / `BuddyState` / the firmware state machine go through
+  an OpenSpec change, not a bare edit.
+- **`REFERENCE.md`** — the *external* wire-protocol contract for forkers. Different
+  audience from `openspec/specs/`; not managed by OpenSpec.
+- **`.omc/specs/`** — OMC agent scratch, git-ignored. Not a spec source.
+- **Tests** — `make test` runs both suites: `pytest` (Python daemons, `tests/`) and
+  `pio test -e native` (pure C++ logic, Unity). `make test-py` / `make test-cpp`
+  run them individually. CI (`.github/workflows/ci.yml`) runs both + the firmware
+  build matrix on every PR.
+- **TDD loop** — `/opsx:propose` writes a delta spec with GIVEN/WHEN/THEN scenarios →
+  translate each scenario into a failing test → implement to green → `/opsx:archive`
+  merges the delta into `openspec/specs/`. See `docs/development.md`.
+
 ## Working norms
 
 - Don't push without explicit user say-so. Commit + show diff first.
