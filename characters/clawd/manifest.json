@@ -13,10 +13,14 @@
     "busy": [
       "busy_0.gif",
       "busy_1.gif",
-      "busy_2.gif"
+      "busy_2.gif",
+      "busy_3.gif"
     ],
     "attention": "attention.gif",
-    "celebrate": "celebrate.gif",
+    "celebrate": [
+      "celebrate.gif",
+      "celebrate_1.gif"
+    ],
     "dizzy": "dizzy.gif",
     "heart": "heart.gif"
   }

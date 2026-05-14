@@ -273,10 +273,16 @@ bool openStateGif(uint8_t state, bool clear_canvas) {
   if (state >= CHAR_N_STATES) return false;
 
   const char* fname = STATE_FILES[state];
-  char busy_buf[16];
+  char var_buf[20];
+  // Some states have multiple GIF variants picked at random for variety:
+  //   busy      → busy_0..busy_3  (busy_3 = the "speaking" claude anim)
+  //   celebrate → celebrate.gif + celebrate_1.gif ("jumping" claude anim)
+  // Other states use STATE_FILES[state] verbatim.
   if (state == CHAR_BUSY) {
-    snprintf(busy_buf, sizeof(busy_buf), "busy_%u.gif", (unsigned)(esp_random() % 3));
-    fname = busy_buf;
+    snprintf(var_buf, sizeof(var_buf), "busy_%u.gif", (unsigned)(esp_random() % 4));
+    fname = var_buf;
+  } else if (state == CHAR_CELEBRATE && (esp_random() & 1)) {
+    fname = "celebrate_1.gif";
   }
   snprintf(g_full_path, sizeof(g_full_path), "%s/%s", g_base, fname);
 
