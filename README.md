@@ -163,8 +163,8 @@ Five PlatformIO envs — pick by hardware *and* by which producer:
 | `m5stickc-plus2-claude`  | Plus2   | `Claude-XXXX`     | `clawd`     | Claude Desktop (Lane A) or cc-bridge (Lane B) |
 | `m5stickc-plus2-cursor`  | Plus2   | `Cursor-XXXX`     | `clawd`     | cursor-bridge (Lane C) |
 | `m5stickc-plus2`         | Plus2   | `Claude-XXXX`     | autodetect  | legacy/plain — no baked-in defaults |
-| `cores3-stackchan-claude`| CoreS3  | `Claude-SC-XXXX`  | `cloudling` | cc-bridge — see [StackChan (CoreS3)](#stackchan-cores3) |
-| `cores3-stackchan-cursor`| CoreS3  | `Cursor-SC-XXXX`  | `cloudling` | cursor-bridge — see [StackChan (CoreS3)](#stackchan-cores3) |
+| `cores3-stackchan-claude`| CoreS3  | `Claude-SC-XXXX`  | `clawd`     | cc-bridge — see [StackChan (CoreS3)](#stackchan-cores3) |
+| `cores3-stackchan-cursor`| CoreS3  | `Cursor-SC-XXXX`  | `clawd`     | cursor-bridge — see [StackChan (CoreS3)](#stackchan-cores3) |
 
 Flash firmware **and** the LittleFS character pack in one shot:
 
@@ -262,11 +262,19 @@ no rebuild needed.
 - USB-C bus alone is at the edge of the current budget when both
   servos run flat-out; the firmware caps move speed at 500 (out of 1000)
   for steady patterns and only briefly hits 800 on CELEBRATE.
-- The cloudling character pack is the default; clawd works on CoreS3
-  too if you copy `characters/clawd/` into `data/characters/` and
-  rebuild with `-DBUDDY_DEFAULT_CHAR=\"clawd\"`. Calico's GIFs hit a
-  green-channel rendering bug on the CoreS3 LCD (still
-  unidentified) — re-encoding pending.
+- The clawd character pack is the default. It carries two extra
+  animations converted from
+  [`shanraisshan/claude-code-best-practice`](https://github.com/shanraisshan/claude-code-best-practice)
+  — a "jumping" celebrate variant and a "speaking" busy variant —
+  random-picked alongside the originals for variety. cloudling is
+  still in `characters/` if you want to switch via the dashboard or
+  `-DBUDDY_DEFAULT_CHAR`. Calico's GIFs hit a green-channel rendering
+  bug on the CoreS3 LCD (still unidentified) — re-encoding pending.
+- The on-device status panel is an Animal Crossing-style layout:
+  the GIF face on the left, a warm cream "NookPhone" card on the
+  right showing the state + latest message, an R/W/token HUD across
+  the top, and a tool-name pill. GIFs are bilinear-scaled for
+  smoother edges.
 
 ## Pairing
 
@@ -333,7 +341,7 @@ src/
   buddies/         — ASCII species (retired) + crab.cpp (Claude mascot)
   stackchan/       — CoreS3 firmware (this fork's new target)
     main.cpp         — BLE NUS peripheral + lock-free RX ring
-    character_chan.cpp — float-scale GIF render → 170 px uniform height
+    character_chan.cpp — bilinear GIF render + ACNH-style status panel
     sound.cpp        — preload /sounds/*.wav, M5.Speaker.playWav
     motion.cpp       — servo dance patterns via StackChan-BSP
     settings.cpp     — NVS-backed runtime settings (dashboard target)
