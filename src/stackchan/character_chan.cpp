@@ -21,9 +21,27 @@
 namespace {
 
 // --- Geometry --------------------------------------------------------------
-constexpr int  STATUS_BAR_H = 60;   // bottom strip for msg + stats
-constexpr int  STATUS_PAD_X = 4;
-constexpr int  TARGET_H     = 170;  // uniform character height (px)
+// 2026-05-14 layout — character LEFT, msg panel RIGHT, stats BOTTOM:
+//   +----------------+--------------------+
+//   | character box  | msg word-wrap      |
+//   | 130 × 144      | 170 × 156          |
+//   +----------------+--------------------+
+//   |  stats bar (full width, 72 tall)    |
+//   +-------------------------------------+
+// Pre-redesign the character was centered at TARGET_H=170 and left
+// wide bands of empty pixels on both sides; msg was a single clipped
+// line. Now those sides are an actual text panel with word-wrap.
+constexpr int  CHAR_BOX_X    = 8;
+constexpr int  CHAR_BOX_Y    = 12;
+constexpr int  CHAR_BOX_W    = 130;
+constexpr int  CHAR_BOX_H    = 144;
+constexpr int  TEXT_PANEL_X  = 146;
+constexpr int  TEXT_PANEL_Y  = 10;
+constexpr int  TEXT_PANEL_W  = 170;   // 320 - 146 - 4 right margin
+constexpr int  TEXT_PANEL_H  = 152;
+constexpr int  STATS_BAR_Y   = 168;
+constexpr int  STATS_BAR_H   = 72;    // ends at y=240
+constexpr int  STATUS_PAD_X  = 6;
 
 // --- File mapping ----------------------------------------------------------
 const char* STATE_FILES[CHAR_N_STATES] = {
@@ -132,13 +150,14 @@ void gifDrawCb(GIFDRAW* d) {
     g_line[xo] = (hasT && src[xi] == tc) ? g_bg : pal[src[xi]];
   }
 
-  int lcd_h    = M5.Lcd.height();
-  int max_y    = lcd_h - STATUS_BAR_H;
+  // Clip character draws to the CHAR_BOX region — stats bar at the
+  // bottom and text panel to the right must not get overwritten.
+  int max_y    = CHAR_BOX_Y + CHAR_BOX_H;
+  int max_x    = CHAR_BOX_X + CHAR_BOX_W;
   int x_dst    = g_gx + out_x0;
-  int lcd_w    = M5.Lcd.width();
   int draw_w   = out_w;
-  if (x_dst < 0) { draw_w += x_dst; x_dst = 0; }
-  if (x_dst + draw_w > lcd_w) draw_w = lcd_w - x_dst;
+  if (x_dst < CHAR_BOX_X) { draw_w -= (CHAR_BOX_X - x_dst); x_dst = CHAR_BOX_X; }
+  if (x_dst + draw_w > max_x) draw_w = max_x - x_dst;
   if (draw_w <= 0) return;
 
   for (int y = out_y0; y < out_y1; y++) {
@@ -173,8 +192,9 @@ bool openStateGif(uint8_t state, bool clear_canvas) {
   closeCurrentGif();
 
   if (clear_canvas) {
-    M5.Lcd.fillRect(0, 0, M5.Lcd.width(),
-                    M5.Lcd.height() - STATUS_BAR_H, g_bg);
+    // Clear only the CHAR_BOX — text panel + stats bar are owned by
+    // paintStatusBarIfChanged and shouldn't be repainted from here.
+    M5.Lcd.fillRect(CHAR_BOX_X, CHAR_BOX_Y, CHAR_BOX_W, CHAR_BOX_H, g_bg);
   }
 
   if (!g_gif.open(g_full_path, gifOpenCb, gifCloseCb,
@@ -188,17 +208,18 @@ bool openStateGif(uint8_t state, bool clear_canvas) {
   g_src_w = g_gif.getCanvasWidth();
   g_src_h = g_gif.getCanvasHeight();
 
-  // Uniform target height: scale so every GIF ends up TARGET_H pixels
-  // tall regardless of native dimensions. Width follows aspect.
-  g_scale_f = (float)TARGET_H / (float)g_src_h;
-  g_out_w   = (int)(g_src_w * g_scale_f);
-  g_out_h   = TARGET_H;
-
-  int lcd_w   = M5.Lcd.width();
-  int avail_h = M5.Lcd.height() - STATUS_BAR_H;
-  g_gx = (lcd_w - g_out_w) / 2;
-  g_gy = (avail_h - g_out_h) / 2;
-  if (g_gy < 0) g_gy = 0;
+  // Fit-into-box: pick scale so the GIF fills CHAR_BOX without bleeding
+  // out either dimension. min(scale_w, scale_h) keeps aspect; floor at
+  // 0.4 just in case a tiny GIF would otherwise shrink to nothing.
+  float scale_w = (float)CHAR_BOX_W / (float)g_src_w;
+  float scale_h = (float)CHAR_BOX_H / (float)g_src_h;
+  g_scale_f = scale_w < scale_h ? scale_w : scale_h;
+  if (g_scale_f < 0.4f) g_scale_f = 0.4f;
+  g_out_w = (int)(g_src_w * g_scale_f);
+  g_out_h = (int)(g_src_h * g_scale_f);
+  // Center within CHAR_BOX.
+  g_gx = CHAR_BOX_X + (CHAR_BOX_W - g_out_w) / 2;
+  g_gy = CHAR_BOX_Y + (CHAR_BOX_H - g_out_h) / 2;
 
   Serial.printf("[char] opened %s  src=%dx%d × %.2f → %dx%d @ (%d,%d)\n",
                 g_full_path, g_src_w, g_src_h, g_scale_f,
@@ -207,30 +228,78 @@ bool openStateGif(uint8_t state, bool clear_canvas) {
   return true;
 }
 
-// --- Status bar paint ------------------------------------------------------
-// Bar layout (60 px tall, bottom of LCD):
-//   y = bar_y      → top edge
-//   y = bar_y + 8  → "msg" row baseline (size 2 text, 16px tall)
-//   y = bar_y + 32 → "stats" row baseline (size 1 text, 8px tall)
-//   y = bar_y + 48 → "tool" row baseline (size 1)
-void paintStatusBarIfChanged() {
-  int lcd_w = M5.Lcd.width();
-  int lcd_h = M5.Lcd.height();
-  int bar_y = lcd_h - STATUS_BAR_H;
+// Word-wrap text into the given pixel-width box. Breaks at whitespace
+// or punctuation (_ - : .) when possible; falls back to hard char-break
+// for unbroken Claude-Code tool names like
+// `mcp__plugin_context-mode_context-mode_ctx_search`. Caller must have
+// set the font/color/datum before invoking. max_lines caps output so
+// runaway msgs don't paint over the stats bar.
+void drawWrapped(const char* text, int x, int y, int max_w,
+                 int line_h, int max_lines) {
+  if (!text || !*text || max_lines <= 0) return;
+  char line[80];
+  size_t llen = 0;
+  int cur_y = y;
+  int drawn = 0;
 
-  bool msg_dirty  = (strncmp(g_msg, g_msg_drawn, sizeof(g_msg)) != 0);
+  auto flush_at = [&](size_t break_at) {
+    char saved = line[break_at];
+    line[break_at] = 0;
+    M5.Lcd.drawString(line, x, cur_y);
+    line[break_at] = saved;
+    cur_y += line_h;
+    drawn++;
+    size_t rem = llen - break_at;
+    memmove(line, line + break_at, rem);
+    llen = rem;
+    while (llen > 0 && (line[0] == ' ')) {
+      memmove(line, line + 1, llen);
+      llen--;
+    }
+    line[llen] = 0;
+  };
+
+  for (const char* p = text; *p && drawn < max_lines; p++) {
+    if (llen >= sizeof(line) - 1) flush_at(llen);
+    line[llen++] = *p;
+    line[llen] = 0;
+    if (M5.Lcd.textWidth(line) > max_w) {
+      // Backtrack to last break-candidate char.
+      int b = (int)llen - 1;
+      while (b > 0) {
+        char c = line[b];
+        if (c == ' ' || c == '_' || c == '-' || c == ':' || c == '.') break;
+        b--;
+      }
+      if (b == 0) b = (int)llen - 1;  // hard break — single long token
+      flush_at((size_t)(b + 1));
+      if (drawn >= max_lines) return;
+    }
+  }
+  if (llen > 0 && drawn < max_lines) {
+    line[llen] = 0;
+    M5.Lcd.drawString(line, x, cur_y);
+  }
+}
+
+// --- Status paint -----------------------------------------------------------
+// Two regions, each repainted lazily on dirty check:
+//   TEXT_PANEL — right side, msg with word-wrap, FreeSansBold12pt
+//   STATS_BAR  — bottom, R/W/tokens + active tool, FreeSans12pt centered
+void paintStatusBarIfChanged() {
+  bool msg_dirty = (strncmp(g_msg, g_msg_drawn, sizeof(g_msg)) != 0);
 
   // Build the stats string into a stable buffer.
-  char stats_now[64];
+  char stats_now[80];
   if (g_tokens >= 1000) {
-    snprintf(stats_now, sizeof(stats_now), "R:%d W:%d  tok:%lu.%luk%s%s",
+    snprintf(stats_now, sizeof(stats_now), "R:%d  W:%d  tok:%lu.%luk%s%s",
              g_running, g_waiting,
              (unsigned long)(g_tokens / 1000),
              (unsigned long)((g_tokens / 100) % 10),
              g_tool[0] ? "  " : "",
              g_tool);
   } else {
-    snprintf(stats_now, sizeof(stats_now), "R:%d W:%d  tok:%lu%s%s",
+    snprintf(stats_now, sizeof(stats_now), "R:%d  W:%d  tok:%lu%s%s",
              g_running, g_waiting, (unsigned long)g_tokens,
              g_tool[0] ? "  " : "",
              g_tool);
@@ -240,30 +309,37 @@ void paintStatusBarIfChanged() {
   if (!msg_dirty && !stats_dirty) return;
 
   if (msg_dirty) {
-    // Clear msg row only — keep stats row intact when only msg changed.
-    M5.Lcd.fillRect(0, bar_y, lcd_w, 28, g_bg);
+    M5.Lcd.fillRect(TEXT_PANEL_X, TEXT_PANEL_Y,
+                    TEXT_PANEL_W, TEXT_PANEL_H, g_bg);
     M5.Lcd.setTextColor(TFT_WHITE, g_bg);
     M5.Lcd.setTextDatum(top_left);
-    M5.Lcd.setTextSize(2);
-    char buf[40];
-    size_t n = strnlen(g_msg, sizeof(g_msg) - 1);
-    if (n > 26) n = 26;
-    memcpy(buf, g_msg, n);
-    buf[n] = 0;
-    M5.Lcd.drawString(buf, STATUS_PAD_X, bar_y + 4);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setFont(&fonts::FreeSansBold12pt7b);
+    // 22 px per line accommodates the 18 px FreeSansBold12pt7b glyph
+    // box plus ~4 px of leading. 6 lines × 22 = 132 px, fits inside
+    // TEXT_PANEL_H=152.
+    drawWrapped(g_msg, TEXT_PANEL_X + 2, TEXT_PANEL_Y + 2,
+                TEXT_PANEL_W - 4, /*line_h=*/22, /*max_lines=*/6);
     strncpy(g_msg_drawn, g_msg, sizeof(g_msg_drawn) - 1);
     g_msg_drawn[sizeof(g_msg_drawn) - 1] = 0;
   }
 
   if (stats_dirty) {
-    M5.Lcd.fillRect(0, bar_y + 30, lcd_w, STATUS_BAR_H - 30, g_bg);
+    M5.Lcd.fillRect(0, STATS_BAR_Y, M5.Lcd.width(), STATS_BAR_H, g_bg);
+    // Thin top divider so the stats bar reads as a distinct region.
+    M5.Lcd.drawFastHLine(0, STATS_BAR_Y, M5.Lcd.width(), TFT_DARKGREY);
     M5.Lcd.setTextColor(TFT_LIGHTGREY, g_bg);
-    M5.Lcd.setTextDatum(top_left);
+    M5.Lcd.setTextDatum(middle_left);
     M5.Lcd.setTextSize(1);
-    M5.Lcd.drawString(stats_now, STATUS_PAD_X, bar_y + 34);
+    M5.Lcd.setFont(&fonts::FreeSans12pt7b);
+    M5.Lcd.drawString(stats_now, STATUS_PAD_X,
+                      STATS_BAR_Y + STATS_BAR_H / 2);
     strncpy(g_stats_drawn, stats_now, sizeof(g_stats_drawn) - 1);
     g_stats_drawn[sizeof(g_stats_drawn) - 1] = 0;
   }
+
+  // Restore default font so any drawString elsewhere doesn't inherit.
+  M5.Lcd.setFont(&fonts::Font0);
 }
 
 }  // namespace
