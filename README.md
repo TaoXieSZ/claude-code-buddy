@@ -287,210 +287,52 @@ If you get `Peer removed pairing information` errors, the macOS bond
 went stale — "Forget This Device" in Bluetooth settings and re-pair.
 Common after wiping the stick or aggressive flash cycles.
 
-## Controls
+## Deep dives
 
-**Standard mode** (no BugC2, or BugC2 attached but _not_ blocking BtnB):
+The stick-specific reference material lives in dedicated docs so this
+README stays focused on what's new in this fork.
 
-|                         | Normal               | Pet         | Info        | Approval    |
-| ----------------------- | -------------------- | ----------- | ----------- | ----------- |
-| **A** (front)           | next screen          | next screen | next screen | **approve** |
-| **B** (right)           | scroll transcript    | next page   | next page   | **deny**    |
-| **Hold A**              | menu                 | menu        | menu        | menu        |
-| **Power** (left, short) | toggle screen off    |             |             |             |
-| **Power** (left, ~6s)   | hard power off       |             |             |             |
-| **Shake**               | dizzy                |             |             | —           |
-| **Face-down**           | nap (energy refills) |             |             |             |
-
-**BugC2 no-B mode** (BugC2 chassis mounted, physically covers BtnB):
-
-Since the BugC2 base covers BtnB, the stick auto-detects this at boot and
-switches button semantics so you can still drive it with A alone:
-
-|                         | Normal / Menu       | Pet / Info  | Approval    |
-| ----------------------- | ------------------- | ----------- | ----------- |
-| **A** (front)           | cycle selection     | cycle pages | cycle approve↔deny |
-| **Hold A**              | confirm / open menu | confirm     | confirm selection |
-
-**PTT dictation gesture** (all modes):
-
-Tap A once, then within 300ms press-and-hold A for ≥250ms. While held, a
-blinking red `REC` banner shows on the top of the screen. Release to stop.
-The daemon translates this to a keystroke (default: right Option) that
-triggers your dictation app. Only active from the idle main screen (no
-menus, no prompts).
-
-**Picking the right PTT mode for your dictation app:**
-
-| App                | `*_BRIDGE_PTT_MODE`   | What the daemon does                                  |
-| ------------------ | --------------------- | ----------------------------------------------------- |
-| Typeless           | `tap` (default)       | One down+up tap per stick gesture transition          |
-| 豆包输入法 长按模式 | `hold`                | Key held while you hold A; released on release        |
-| 豆包输入法 免按模式 | `double_tap`          | Double-tap on press; double-tap on release            |
-
-The env var name is `CC_BRIDGE_PTT_MODE` for the Claude Code daemon and
-`CURSOR_BRIDGE_PTT_MODE` for the Cursor daemon. Default is `tap` so the
-out-of-the-box Typeless flow keeps working with no config.
-
-To make a non-default mode survive Mac reboots, add it to the plist:
-
-```xml
-<!-- ~/Library/LaunchAgents/com.cc-bridge.plist, inside EnvironmentVariables -->
-<key>CC_BRIDGE_PTT_MODE</key>
-<string>hold</string>
-```
-
-Then `launchctl unload` + `launchctl load` the plist (or just reboot).
-For a one-shot test without editing the plist:
-
-```bash
-launchctl setenv CC_BRIDGE_PTT_MODE hold
-launchctl kickstart -k gui/$(id -u)/com.cc-bridge
-```
-
-The same `CC_BRIDGE_PTT_KEYCODE` / `CURSOR_BRIDGE_PTT_KEYCODE` (default 61
-= right Option) lets you switch the relayed key if your dictation app
-uses a different hotkey.
-
----
-
-The screen auto-powers-off after 30s of no interaction (kept on while an
-approval prompt is up). After 15s of no button press / session activity, the
-stick visibly nods off into idle sleep (P_SLEEP state) before the 30s
-auto-off triggers. Any button press wakes it.
-
-## GIF character
-
-The default GIF pack is **clawd**, with all sprite art credit to
-[`rullerzhou-afk/clawd-on-desk`](https://github.com/rullerzhou-afk/clawd-on-desk)
-— a delightful collection of pixel-art Claude crab animations originally
-made as a desk companion. Huge thanks to
-[@rullerzhou-afk](https://github.com/rullerzhou-afk) for the art; we
-just resize and remap it onto the buddy's persona-state engine here.
-
-| Our state | Clawd GIF | Preview |
-|---|---|---|
-| `sleep` | `clawd-sleeping.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-sleeping.gif" width="96"> |
-| `idle` | `clawd-idle.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-idle.gif" width="96"> |
-| `busy` | `clawd-thinking` / `typing` / `building` (rotates) | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-thinking.gif" width="80"> <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-typing.gif" width="80"> <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-building.gif" width="80"> |
-| `attention` | `clawd-notification.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-notification.gif" width="96"> |
-| `celebrate` | `clawd-juggling.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-juggling.gif" width="96"> |
-| `dizzy` | `clawd-conducting.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-conducting.gif" width="96"> |
-| `heart` | `clawd-happy.gif` | <img src="https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif/clawd-happy.gif" width="96"> |
-
-To use your own pack: drag the folder onto the Hardware Buddy window
-(streams over BLE), or for fast iteration:
-
-```bash
-python3 tools/prep_character.py /path/to/source-gifs
-python3 tools/flash_character.py characters/<name>
-```
-
-A character pack is a folder with `manifest.json` and source GIFs at any
-size. `prep_character.py` resizes to **120px wide** (was 96 upstream — the
-larger size makes idle/sleep poses readable on Plus2's 135×240 screen).
-Each state cropped to its **own bbox**, not a global bbox — small poses
-(idle/sleep) no longer get padded out to match the widest pose
-(juggling/conducting).
-
-```json
-{
-  "name": "clawd",
-  "colors": { "body": "#D97757", "bg": "#000000", ... },
-  "states": {
-    "sleep": "clawd-sleeping.gif",
-    "idle":  "clawd-idle.gif",
-    ...
-  }
-}
-```
-
-State values can be a single filename or an array; arrays rotate so the
-home screen doesn't loop one clip forever.
-
-The whole folder must fit under 1.8MB. `gifsicle --lossy=80 -O3 --colors 64`
-typically cuts 40–60% if you bust the cap.
-
-## BugC2 chassis (optional)
-
-If you mount the stick on a BugC2 base, the firmware drives the chassis
-to mirror the buddy's persona state:
-
-| Persona state | BugC2 motion + LED                                              |
-|---------------|------------------------------------------------------------------|
-| `sleep`       | motors off, LEDs off                                             |
-| `idle`        | motors off, LEDs dim cyan                                        |
-| `busy`        | 1.2s in-place spin + 3-chirp ascending bleep (900/1300/1700 Hz) |
-| `attention`   | 80ms twitch every ~1.2s, amber LED breathing pulse              |
-| `celebrate`   | continuous gentle spin, green LEDs                              |
-| `dizzy`       | quick alternating spin, yellow LEDs (capped at 600ms)           |
-| `heart`       | pink heartbeat (thump-thump) on LEDs + occasional small wiggle  |
-
-I2C protocol verified verbatim against `m5stack/M5Hat-BugC@c054b6e`. The
-driver uses Arduino `Wire` (I2C_NUM_0) at 400 kHz on G0/G26 — **not** `Wire1`
-which would collide with M5Unified's IMU/RTC bus.
-
-### Manual motor calibration
-
-`tools/motor-calib.html` is a Web Bluetooth page that connects to the stick
-over the existing NUS service and sends raw 4-channel motor commands
-(`{"cmd":"motor","s":[a,b,c,d]}`). Useful for figuring out which channel
-drives which wheel, finding the FORWARD pattern, and tuning per-side speed
-trim if your motors are asymmetric.
-
-```bash
-cd tools
-python3 -m http.server 8765
-open http://localhost:8765/motor-calib.html
-```
-
-Connect, then sliders / WASD / preset buttons send commands. Auto-stop
-after 1500ms of no keepalive. Manual mode suspends the persona-state
-mapping so the operator owns the chassis.
-
-## The seven states
-
-| State       | Trigger                     | Feel                        |
-| ----------- | --------------------------- | --------------------------- |
-| `sleep`     | bridge not connected        | eyes closed, slow breathing |
-| `idle`      | connected, nothing urgent   | blinking, looking around    |
-| `busy`      | session actively running    | thinking, working           |
-| `attention` | approval pending            | alert, **LED blinks**       |
-| `celebrate` | level up (every 50K tokens) | confetti, bouncing          |
-| `dizzy`     | you shook the stick         | spiral eyes, wobbling       |
-| `heart`     | approved in under 5s        | floating hearts             |
-
-> Heads up: this fork lowers the `busy` threshold from `running >= 3` to
-> `running >= 1`, so a single session counts as busy and the BugC2 chassis
-> reacts. Stick semantics otherwise unchanged.
+- **[Controls](docs/controls.md)** — Plus2 button map (standard + no-B
+  mode), PTT dictation gesture, per-app PTT mode picker (Typeless /
+  Doubao 长按 / 免按), screen-off semantics.
+- **[Character packs](docs/character-packs.md)** — built-in packs
+  (clawd, calico, bufo, cloudling), `manifest.json` shape, state→GIF
+  mapping previews, pack-prep pipeline, StackChan-specific scaling.
+- **[BugC2 chassis](docs/bugc2.md)** — optional Plus2 robot base; per-state
+  motion + LED catalog, I²C protocol notes, manual motor calibration
+  via Web Bluetooth.
+- **[Persona state machine](docs/states.md)** — the seven states
+  (`sleep` / `idle` / `busy` / `attention` / `celebrate` / `dizzy` /
+  `heart`), what triggers each, and the per-target output mapping
+  (Plus2 sprite ↔ BugC2 motion ↔ StackChan dance).
 
 ## Project layout
 
 ```
 src/
-  main.cpp       — loop, state machine, UI screens
-  buddy.cpp      — ASCII species dispatch + render helpers
-  buddies/       — one file per species, seven anim functions each
-                   (now includes crab.cpp = Claude mascot, default)
-  ble_bridge.cpp — Nordic UART service, line-buffered TX/RX
-  character.cpp  — GIF decode + render (per-state bbox aware)
-  bugc2.{h,cpp}  — BugC2 chassis driver + persona-state motion catalog
-  m5_compat.h    — Plus / Plus2 cross-board API shim (M5Unified)
-  data.h         — wire protocol, JSON parse (incl. {"cmd":"motor",...})
-  xfer.h         — folder push receiver
-  stats.h        — NVS-backed stats, settings, owner, species choice
-characters/      — bufo (upstream), clawd, calico (this fork)
+  main.cpp         — Plus2 firmware entry (state machine, UI screens)
+  bugc2.{h,cpp}    — Plus2 BugC2 chassis driver (I²C, motion catalog)
+  m5_compat.h      — Plus / Plus2 cross-board shim over M5Unified
+  ble_bridge.cpp   — NUS service for the Plus2 firmware
+  character.cpp    — GIF decode + render (per-state bbox aware)
+  data.h           — wire protocol, JSON parse (incl. motor cmd)
+  buddies/         — ASCII species (retired) + crab.cpp (Claude mascot)
+  stackchan/       — CoreS3 firmware (this fork's new target)
+    main.cpp         — BLE NUS peripheral + lock-free RX ring
+    character_chan.cpp — float-scale GIF render → 170 px uniform height
+    sound.cpp        — preload /sounds/*.wav, M5.Speaker.playWav
+    motion.cpp       — servo dance patterns via StackChan-BSP
+    settings.cpp     — NVS-backed runtime settings (dashboard target)
 tools/
-  prep_character.py   — resize source GIFs to 120px / per-state bbox
-  flash_character.py  — fast USB uploadfs path (skips BLE)
-  motor-calib.html    — Web Bluetooth BugC2 calibrator
-  cc-bridge/          — Claude Code (CLI) hooks → stick (daemon + hooks)
-  cursor-bridge/      — Cursor IDE hooks → second stick (parallel daemon)
-platformio.ini   — three Plus2 build envs:
-  m5stickc-plus2          plain (Claude- BLE name, scan LittleFS for char)
-  m5stickc-plus2-claude   pinned to Claude- + clawd default character
-  m5stickc-plus2-cursor   pinned to Cursor- + clawd default character + rebranded info screens
-mac-helper/      — Swift package: clipboard sync helper
-.omc/            — OMC tooling state (gitignored)
+  buddy_core/      — shared daemon library (BleWriter, heartbeat loop)
+  cc-bridge/       — Claude Code CLI bridge + dashboard.py HTTP server
+  cursor-bridge/   — Cursor IDE bridge
+  prep_character.py / flash_character.py / motor-calib.html
+characters/        — source GIFs: clawd / calico / bufo / cloudling
+data/              — staged LittleFS contents (gitignored, uploadfs source)
+docs/              — deep-dive references (controls, packs, BugC2, states)
+platformio.ini     — five build envs (3 Plus2 variants + 2 CoreS3 variants)
+mac-helper/        — Swift clipboard-sync helper
 ```
 
 ## Setting up another stick
@@ -582,12 +424,20 @@ This fork stands on the shoulders of:
   crab species, and the chassis driver on top.
 
 - **[`rullerzhou-afk/clawd-on-desk`](https://github.com/rullerzhou-afk/clawd-on-desk)**
-  by [@rullerzhou-afk](https://github.com/rullerzhou-afk) — every clawd
-  pixel-art animation in this fork's GIF pack. The Claude crab is from
-  this collection; we just resize it and map each pose onto our
-  PersonaState. If you like clawd, go star their repo — there are
-  many more poses (calico, cloudling, building, sweeping, carrying…)
-  that are easy to wire up by editing `tools/clawd-src/manifest.json`.
+  by [@rullerzhou-afk](https://github.com/rullerzhou-afk) — both the
+  **clawd** crab (Plus2 default) and the **cloudling** cloud sprite
+  (StackChan default) come from this collection. Pixel art is theirs;
+  we just resize it and map each pose onto our PersonaState. If you
+  like the look, go star their repo — many more poses (calico,
+  building, sweeping, carrying, mini-* variants…) are easy to wire
+  up by editing the pack's `manifest.json`.
+
+- **[`shanraisshan/claude-code-hooks`](https://github.com/shanraisshan/claude-code-hooks)**
+  by [@shanraisshan](https://github.com/shanraisshan) — the ElevenLabs
+  "Samara X" voice clips played through the StackChan speaker. We
+  mirror their `sounds/<event>/*.wav` files and resample to 16 kHz mono
+  to fit LittleFS; full event-naming and triggering credit goes to
+  the original hook pack.
 
 - **[`m5stack/M5Hat-BugC`](https://github.com/m5stack/M5Hat-BugC)**
   — official BugC/BugC2 chassis library. Used as the
