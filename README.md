@@ -71,6 +71,20 @@ persona engine.
   <img src="docs/device-plus2-bugc2.jpg" alt="M5StickC Plus2 mounted on a BugC2 chassis, screen showing the clawd buddy with mood/fed/energy stats" width="500">
 </p>
 
+## Contents
+
+- [Quick start](#quick-start)
+- [Hardware](#hardware)
+- [Flashing](#flashing)
+- [StackChan (CoreS3)](#stackchan-cores3)
+- [Pairing](#pairing)
+- [Deep dives](#deep-dives) — [controls](docs/controls.md) · [character packs](docs/character-packs.md) · [BugC2 chassis](docs/bugc2.md) · [persona states](docs/states.md)
+- [Project layout](#project-layout)
+- [Setting up another stick](#setting-up-another-stick)
+- [TODO](#todo)
+- [Availability](#availability)
+- [Credits](#credits)
+
 ## Quick start
 
 Pick the producer you want and run that lane. Each is self-contained;
