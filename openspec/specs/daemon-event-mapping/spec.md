@@ -11,9 +11,7 @@ material enough to warrant an immediate heartbeat emit.
 This spec captures the *current* behaviour of that mapping. It is the source of truth
 for what the firmware HUD's R (running) / W (waiting) / token counters and the status
 message mean.
-
 ## Requirements
-
 ### Requirement: Session counting
 
 `apply_event` MUST track the number of live IDE sessions in `state.total`, keyed by
@@ -66,7 +64,8 @@ to the BUSY state.
 ### Requirement: Permission waiting state
 
 When the IDE blocks on a user decision, `apply_event` MUST surface it via
-`state.waiting` and `state.prompt` so the firmware can show the ATTENTION state.
+`state.waiting` and `state.prompt` so the firmware can show the ATTENTION state,
+and MUST clear them once the session is no longer blocked.
 
 #### Scenario: Permission requested
 - GIVEN a `BuddyState` with `waiting == 0`
@@ -76,12 +75,22 @@ When the IDE blocks on a user decision, `apply_event` MUST surface it via
 #### Scenario: Safe tools never block
 - GIVEN a `PermissionRequest` event
 - WHEN the tool is in `SAFE_TOOLS` (AskUserQuestion, *PlanMode, TodoWrite, Task*)
-- THEN `state.waiting` and `state.prompt` are left untouched (asking to approve being asked is a logic loop)
+- THEN `state.waiting` and `state.prompt` are left untouched
 
-> NOTE: the cc-bridge async `apply_event` path currently has no scenario that
-> resets `state.waiting` back to 0 — only the synchronous `hook_permission.py`
-> path (`core.py:_handle_wait_permission`) clears it. This gap is tracked by
-> change `0001-heartbeat-counter-lifecycle`.
+#### Scenario: Waiting clears when the turn ends
+- GIVEN a `BuddyState` with `waiting == 1` from a prior `PermissionRequest`
+- WHEN a `Stop` event arrives
+- THEN `state.waiting` is reset to 0 and `state.prompt` is set to `None`
+
+#### Scenario: Waiting clears when a tool starts
+- GIVEN a `BuddyState` with `waiting == 1` from a prior `PermissionRequest`
+- WHEN a `PreToolUse` event arrives (the pending permission was granted)
+- THEN `state.waiting` is reset to 0 and `state.prompt` is set to `None`
+
+#### Scenario: Waiting clears when a new turn starts
+- GIVEN a `BuddyState` with `waiting == 1` from a prior `PermissionRequest`
+- WHEN a `UserPromptSubmit` event arrives
+- THEN `state.waiting` is reset to 0 and `state.prompt` is set to `None`
 
 ### Requirement: Token accounting
 
@@ -93,6 +102,11 @@ When the IDE reports token usage, the daemon SHALL accumulate it into
 - WHEN `apply_event` (cursor-bridge) processes it
 - THEN `state.tokens` and `state.tokens_today` are incremented by that amount
 
-> NOTE: cc-bridge does not currently accumulate tokens — whether Claude Code hook
-> events carry token data is an open question tracked by change
-> `0001-heartbeat-counter-lifecycle`.
+#### Scenario: Claude Code provides no token data
+- GIVEN the cc-bridge daemon
+- WHEN it processes Claude Code hook events
+- THEN `state.tokens` is left at 0 — Claude Code's standard hook events carry no
+  token-usage field, so cc-bridge has no source to accumulate from. Surfacing a
+  live token count for this path needs a separate data source (e.g. transcript
+  tailing) and is tracked as future work, not a defect in this mapping.
+

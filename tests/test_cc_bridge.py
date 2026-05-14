@@ -107,6 +107,37 @@ def test_waiting_for_input_notification_clears_running(cc, fresh_state):
     assert fresh_state.msg == "Claude is waiting for your input"
 
 
+# ─── waiting clears when the turn progresses (Change 0001) ───────────
+
+def _block_on_permission(cc, state):
+    cc.apply_event(state, ev("PermissionRequest", tool_name="Bash", request_id="r1"))
+    assert state.waiting == 1 and state.prompt is not None
+
+
+def test_waiting_clears_on_stop(cc, fresh_state):
+    cc.apply_event(fresh_state, ev("SessionStart"))
+    cc.apply_event(fresh_state, ev("UserPromptSubmit"))
+    _block_on_permission(cc, fresh_state)
+    cc.apply_event(fresh_state, ev("Stop"))
+    assert fresh_state.waiting == 0
+    assert fresh_state.prompt is None
+
+
+def test_waiting_clears_on_pre_tool_use(cc, fresh_state):
+    # A tool starting means the pending permission was granted.
+    _block_on_permission(cc, fresh_state)
+    cc.apply_event(fresh_state, ev("PreToolUse", tool_name="Bash"))
+    assert fresh_state.waiting == 0
+    assert fresh_state.prompt is None
+
+
+def test_waiting_clears_on_new_user_prompt(cc, fresh_state):
+    _block_on_permission(cc, fresh_state)
+    cc.apply_event(fresh_state, ev("UserPromptSubmit"))
+    assert fresh_state.waiting == 0
+    assert fresh_state.prompt is None
+
+
 # ─── post-compact ─────────────────────────────────────────────────────
 
 def test_post_compact_adds_entry(cc, fresh_state):

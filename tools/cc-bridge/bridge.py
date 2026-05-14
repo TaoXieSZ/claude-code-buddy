@@ -75,6 +75,20 @@ SAFE_TOOLS = {
 
 
 # ─── hook event → state mutations ──────────────────────────────────────
+def _clear_waiting(state: BuddyState) -> None:
+    """Reset the permission-blocked counters.
+
+    The async apply_event path sets state.waiting/state.prompt on a
+    PermissionRequest but, unlike the synchronous hook_permission.py path
+    (core.py:_handle_wait_permission), never had a place to clear them — so
+    W stuck at 1 on the HUD forever. Called when the turn progresses
+    (UserPromptSubmit / PreToolUse / Stop), which means the user is no
+    longer being blocked on. See change 0001-heartbeat-counter-lifecycle.
+    """
+    state.waiting = 0
+    state.prompt = None
+
+
 def apply_event(state: BuddyState, ev: dict) -> bool:
     """Mutate state from a Claude Code hook event. Returns True if the
     payload changed materially (= we should re-emit immediately)."""
@@ -110,7 +124,9 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             changed = True
 
     elif name == "UserPromptSubmit":
-        # User just submitted → model about to think.
+        # User just submitted → model about to think. A new turn means any
+        # prior permission prompt is no longer blocking.
+        _clear_waiting(state)
         if sid in state._sessions and not state._sessions[sid].get("running"):
             state._sessions[sid]["running"] = True
             state.running += 1
@@ -127,6 +143,8 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
 
     elif name == "Stop":
         # Assistant done responding (this turn). Session still open.
+        # Turn ended → no longer blocked on the user.
+        _clear_waiting(state)
         s = state._sessions.get(sid)
         if s and s.get("running"):
             s["running"] = False
@@ -135,6 +153,8 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             changed = True
 
     elif name == "PreToolUse":
+        # A tool starting means a pending permission was granted.
+        _clear_waiting(state)
         tool = ev.get("tool_name") or "tool"
         state.msg = f"running: {tool}"
         ti = ev.get("tool_input") or {}
