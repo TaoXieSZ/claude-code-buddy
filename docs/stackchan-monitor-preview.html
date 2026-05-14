@@ -7,16 +7,21 @@
   :root {
     --bg: #0a0a0a;
     --panel: #111;
+    /* page chrome (the doc wrapper around the device previews) */
     --text-pri: #fff;
     --text-sec: #8E8E93;
-    --text-caps: #6B6B6D;
-    --card-fill: #1C1C1E;
-    --card-div: #2A2A2C;
-    --orange: #FF9500;
-    --red: #FF453A;
-    --green: #34C759;
-    --yellow: #FFD60A;
-    --grey: #6B6B6D;
+    /* Animal-Crossing / NookPhone palette (ref: animal-island-ui) */
+    --card-fill: #F7F3DF;
+    --card-border: #AAA69D;
+    --card-shadow: #BDAEA0;
+    --card-div: #E8E2D6;
+    --card-text: #794F27;
+    --card-text-sec: #9F927D;
+    --teal: #19C8B9;
+    --yellow: #F5C31C;
+    --red: #E05A5A;
+    --green: #6FBA2C;
+    --brown: #9A835A;
     --face-tint: #1a1a1d;
   }
   * { box-sizing: border-box; }
@@ -87,29 +92,34 @@
     height: 240px;
   }
 
-  /* HUD ------------------------------------------------------- */
+  /* ACNH card primitive — cream fill, 2px border, flat offset
+     drop-shadow (box-shadow: 0 4px 0 0, no blur). */
+  .acnh-card {
+    background: var(--card-fill);
+    border: 2px solid var(--card-border);
+    box-shadow: 0 4px 0 0 var(--card-shadow);
+  }
+
+  /* HUD — one ACNH card spanning the top -------------------- */
   .hud {
     position: absolute;
-    left: 0; right: 0; top: 0;
-    height: 38px;
-    padding: 2px 8px 0;
-    border-bottom: 1px solid var(--card-div);
+    left: 4px; top: 2px;
+    width: 312px; height: 32px;
+    border-radius: 16px;
+    background: var(--card-fill);
+    border: 2px solid var(--card-border);
+    box-shadow: 0 4px 0 0 var(--card-shadow);
+    display: flex; align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
   }
-  .hud .row1 {
-    display: flex; justify-content: space-between;
-    color: var(--text-caps);
-    font: 700 8.5px/16px "SF Compact Text", -apple-system, sans-serif;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+  .hud .row1 { display: none; }   /* device HUD is single-row */
+  .hud .row2 { display: contents; }
+  .hud .row2 span {
+    font: 700 12px/1 Nunito, -apple-system, sans-serif;
+    color: var(--card-text);
   }
-  .hud .row2 {
-    display: flex; justify-content: space-between;
-    margin-top: 1px;
-    font: 700 12px/16px "SF Compact Text", -apple-system, sans-serif;
-  }
-  .hud .tokens {
-    color: var(--orange);   /* overridden per state */
-  }
+  .hud .row2 .tokens { color: var(--card-text-sec); }
 
   /* Char box -------------------------------------------------- */
   .face {
@@ -125,12 +135,14 @@
   }
   .face .emoji { filter: grayscale(0.4) brightness(0.9); }
 
-  /* Bubble card ---------------------------------------------- */
+  /* Bubble card — ACNH cream card + accent header strip ------ */
   .card {
     position: absolute;
     left: 184px; top: 44px;
     width: 132px; height: 148px;
     background: var(--card-fill);
+    border: 2px solid var(--card-border);
+    box-shadow: 0 4px 0 0 var(--card-shadow);
     border-radius: 14px;
     overflow: hidden;
   }
@@ -138,9 +150,10 @@
     height: 20px;
     padding: 0 10px;
     display: flex; align-items: center;
-    font: 700 10px/1 "SF Compact Text", -apple-system, sans-serif;
-    letter-spacing: 0.08em;
-    color: #000;
+    font: 800 10px/1 Nunito, -apple-system, sans-serif;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #fff;   /* brown on yellow — overridden for busy */
   }
   .card-divider {
     height: 1px;
@@ -148,42 +161,45 @@
   }
   .card-body {
     padding: 8px;
-    font: 700 10.5px/14px "SF Compact Text", -apple-system, sans-serif;
-    color: var(--text-pri);
+    font: 700 10.5px/14px Nunito, -apple-system, sans-serif;
+    color: var(--card-text);
     height: calc(100% - 20px - 1px);
     overflow: hidden;
   }
 
-  /* Tool chip pill ------------------------------------------- */
+  /* Tool chip — ACNH cream pill ------------------------------ */
   .chip {
     position: absolute;
     left: 184px; top: 200px;
     width: 132px; height: 32px;
     background: var(--card-fill);
+    border: 2px solid var(--card-border);
+    box-shadow: 0 4px 0 0 var(--card-shadow);
     border-radius: 16px;
     display: flex; align-items: center;
-    padding: 0 14px;
+    padding: 0 12px;
     gap: 10px;
   }
   .chip-dot {
     width: 8px; height: 8px; border-radius: 50%;
   }
   .chip-name {
-    font: 700 10.5px/1 "SF Compact Text", -apple-system, sans-serif;
-    letter-spacing: 0.04em;
+    font: 800 10.5px/1 Nunito, -apple-system, sans-serif;
+    letter-spacing: 0.02em;
     text-transform: uppercase;
-    color: var(--text-pri);
+    color: var(--card-text);
   }
 
-  /* State-driven accent colors (one var per cell) ------------- */
-  .cell[data-state="busy"]      { --accent: var(--orange); }
-  .cell[data-state="idle"]      { --accent: var(--green); }
+  /* State-driven accent colors (ACNH palette) ---------------- */
+  .cell[data-state="busy"]      { --accent: var(--yellow); }
+  .cell[data-state="idle"]      { --accent: var(--teal); }
   .cell[data-state="attention"] { --accent: var(--red); }
-  .cell[data-state="celebrate"] { --accent: var(--yellow); }
-  .cell[data-state="sleep"]     { --accent: var(--grey); }
+  .cell[data-state="celebrate"] { --accent: var(--green); }
+  .cell[data-state="sleep"]     { --accent: var(--brown); }
   .cell .card-head { background: var(--accent); }
   .cell .chip-dot  { background: var(--accent); }
-  .cell .hud .tokens { color: var(--accent); }
+  /* BUSY = yellow header → brown text for contrast (matches device) */
+  .cell[data-state="busy"] .card-head { color: var(--card-text); }
 
   /* Spec sidebar --------------------------------------------- */
   .legend {
@@ -223,12 +239,15 @@
 </head>
 <body>
 
-<h1>StackChan monitor — watchOS redesign</h1>
+<h1>StackChan monitor — Animal Crossing redesign</h1>
 <p class="sub">
-  CoreS3 320×240 LCD shown 2× for legibility. Five states across the
-  same layout — only the accent (header strip / tokens / chip dot)
-  changes per state. Face area is a placeholder; real device runs the
-  GIF pack.
+  CoreS3 320×240 LCD shown 2× for legibility. Warm cream "NookPhone"
+  cards (2px border + flat offset drop-shadow) floating on a dark
+  canvas — design language referenced from
+  <a href="https://github.com/guokaigdg/animal-island-ui" style="color:#82d5bb">guokaigdg/animal-island-ui</a>.
+  Five states share the layout; only the accent (header strip / chip
+  dot) changes. Face area is a placeholder; real device runs the GIF
+  pack on its own dark box.
 </p>
 
 <div class="grid">
@@ -347,19 +366,21 @@
 <section class="legend">
   <h2>Spec</h2>
   <dl>
-    <dt>Canvas</dt>            <dd>320 × 240, rotation 1 (landscape), pure black (#000000)</dd>
-    <dt>HUD bar</dt>           <dd>0,0 → 320,38 · two-row · grey caps labels + bold values · tokens in state accent</dd>
-    <dt>Face box</dt>          <dd>4,40 → 180,236 (176 × 196) · GIF fit-into-box scaler</dd>
-    <dt>Bubble card</dt>       <dd>184,44 → 316,192 (132 × 148) · r=14 · fill <span class="swatch" style="background:#1C1C1E"></span>#1C1C1E · accent header strip 20px with caps state label</dd>
-    <dt>Tool chip</dt>         <dd>184,200 → 316,232 (132 × 32) · full pill r=16 · dark fill + accent dot + uppercase tool name</dd>
+    <dt>Canvas</dt>            <dd>320 × 240, rotation 1 (landscape), dark canvas (#000000)</dd>
+    <dt>ACNH card</dt>         <dd>cream fill <span class="swatch" style="background:#F7F3DF"></span>#F7F3DF · 2px border <span class="swatch" style="background:#AAA69D"></span>#AAA69D · flat offset shadow <span class="swatch" style="background:#BDAEA0"></span>#BDAEA0 (+4y, no blur)</dd>
+    <dt>HUD card</dt>          <dd>4,2 → 316,34 (312 × 32) · r=16 · single row · R/W brown left, token count secondary-brown right</dd>
+    <dt>Face box</dt>          <dd>4,40 → 180,236 (176 × 196) · GIF fit-into-box scaler, own dark box (unchanged)</dd>
+    <dt>Bubble card</dt>       <dd>184,44 → 316,192 (132 × 148) · r=14 · accent header strip 20px w/ caps state label · body brown text</dd>
+    <dt>Tool chip</dt>         <dd>184,200 → 316,232 (132 × 32) · full pill r=16 · accent dot + uppercase tool name in brown</dd>
+    <dt>Text</dt>              <dd>primary <span class="swatch" style="background:#794F27"></span>#794F27 · secondary <span class="swatch" style="background:#9F927D"></span>#9F927D</dd>
     <dt>Accents</dt>           <dd>
-      <span class="swatch" style="background:#FF453A"></span>red ATTN ·
-      <span class="swatch" style="background:#FF9500"></span>orange BUSY ·
-      <span class="swatch" style="background:#34C759"></span>green IDLE ·
-      <span class="swatch" style="background:#FFD60A"></span>yellow DONE ·
-      <span class="swatch" style="background:#6B6B6D"></span>grey SLEEP
+      <span class="swatch" style="background:#E05A5A"></span>red ATTN ·
+      <span class="swatch" style="background:#F5C31C"></span>yellow BUSY ·
+      <span class="swatch" style="background:#19C8B9"></span>teal IDLE ·
+      <span class="swatch" style="background:#6FBA2C"></span>green DONE ·
+      <span class="swatch" style="background:#9A835A"></span>brown SLEEP
     </dd>
-    <dt>Typography</dt>        <dd>HUD caps Font2 · HUD values FreeSansBold9pt · card body FreeSansBold9pt · chip FreeSansBold9pt all-caps</dd>
+    <dt>Typography</dt>        <dd>device: FreeSans / FreeSansBold 9pt &amp; 12pt smooth fonts · fillSmoothRoundRect for AA corners</dd>
   </dl>
 </section>
 

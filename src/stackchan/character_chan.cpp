@@ -36,20 +36,24 @@ namespace {
 // bubble + tool chip pair, with state-coloured border so the
 // glance-test answer "what is Claude doing?" works without reading
 // the msg. HUD on top frees the bottom for full-height bubble.
-// watchOS-leaning palette: pure black canvas, dark "card" surfaces,
-// vibrant accent for the active state. Screen bg is forced to black
-// regardless of manifest — manifest bg still drives GIF transparency
-// inside CHAR_BOX so per-character backgrounds work as before.
-constexpr uint16_t SCREEN_BG   = 0x0000;   // #000000
-constexpr uint16_t CARD_FILL   = 0x18C3;   // #1C1C1E (Apple Watch card)
-constexpr uint16_t CARD_DIV    = 0x2965;   // #2A2A2C
-constexpr uint16_t TEXT_PRI    = 0xFFFF;   // white
-constexpr uint16_t TEXT_SEC    = 0x8C71;   // #8E8E93 secondary label grey
-constexpr uint16_t TEXT_CAPS   = 0x6B4D;   // #6B6B6D tiny caps label
+// Animal-Crossing / NookPhone palette (ref: guokaigdg/animal-island-ui
+// design tokens). Warm cream "cards" with a 2px brown border and the
+// signature flat offset drop-shadow, floating on a dark canvas like
+// NookPhone app tiles. Screen bg stays dark (keeps the GIF looking
+// good — user already approved it); manifest bg still drives GIF
+// transparency inside CHAR_BOX.
+constexpr uint16_t SCREEN_BG    = 0x0000;   // #000000 dark canvas
+constexpr uint16_t CARD_FILL    = 0xF79B;   // #F7F3DF warm cream
+constexpr uint16_t CARD_BORDER  = 0xAD33;   // #AAA69D warm grey border
+constexpr uint16_t CARD_SHADOW  = 0xBD74;   // #BDAEA0 flat offset shadow
+constexpr uint16_t CARD_DIV     = 0xE71C;   // #E8E2D6 light divider
+constexpr uint16_t CARD_TEXT    = 0x7A64;   // #794F27 warm brown text
+constexpr uint16_t CARD_TEXT_SEC= 0x9C8F;   // #9F927D secondary brown
+constexpr int      CARD_BW      = 2;        // border width
+constexpr int      CARD_SHADOW_DY = 4;      // shadow vertical offset
 
-constexpr int  HUD_Y         = 0;
-constexpr int  HUD_H         = 38;
-constexpr int  HUD_PAD_X     = 8;
+constexpr int  HUD_Y         = 2;
+constexpr int  HUD_H         = 32;   // card; +CARD_SHADOW_DY ends at 38
 constexpr int  CHAR_BOX_X    = 4;
 constexpr int  CHAR_BOX_Y    = 40;
 constexpr int  CHAR_BOX_W    = 176;
@@ -67,17 +71,23 @@ constexpr int  TOOL_CHIP_W   = 132;
 constexpr int  TOOL_CHIP_H   = 32;
 constexpr int  TOOL_CHIP_R   = 16;   // full-pill radius (= h/2)
 
-// State → accent colour for the bubble header strip and the dot in
-// the chip. red=act, orange=busy, green=ok, yellow=done, grey=asleep.
+// State → accent colour for the bubble header strip and the chip dot.
+// Animal-Crossing palette: teal IDLE, warning-yellow BUSY, error-red
+// ATTN, success-green DONE, warm-brown SLEEP.
 uint16_t accentForState(uint8_t s) {
   switch (s) {
-    case 3 /*CHAR_ATTENTION*/: return 0xFA28;   // #FF453A
-    case 2 /*CHAR_BUSY*/:      return 0xFCA0;   // #FF9500
-    case 1 /*CHAR_IDLE*/:      return 0x36A8;   // #34C759
-    case 4 /*CHAR_CELEBRATE*/: return 0xFEC1;   // #FFD60A
-    case 0 /*CHAR_SLEEP*/:     return 0x6B4D;   // #6B6B6D
-    default:                   return 0xFFFF;
+    case 3 /*CHAR_ATTENTION*/: return 0xE2CB;   // #E05A5A error red
+    case 2 /*CHAR_BUSY*/:      return 0xF603;   // #F5C31C warning yellow
+    case 1 /*CHAR_IDLE*/:      return 0x1E57;   // #19C8B9 primary teal
+    case 4 /*CHAR_CELEBRATE*/: return 0x6DC5;   // #6FBA2C success green
+    case 0 /*CHAR_SLEEP*/:     return 0x9C0B;   // #9A835A warm brown
+    default:                   return 0x9C0B;
   }
+}
+// Header-strip text colour: ACNH cards use brown on light variants
+// (yellow), white on saturated ones.
+uint16_t headerTextForState(uint8_t s) {
+  return (s == 2 /*BUSY/yellow*/) ? CARD_TEXT : 0xFFFF;
 }
 const char* labelForState(uint8_t s) {
   switch (s) {
@@ -374,87 +384,95 @@ void drawWrapped(const char* text, int x, int y, int max_w,
 // repaint.
 uint8_t      g_accent_drawn = 0xFF;   // last state painted to bubble header
 
-// watchOS card: rounded dark surface + thin accent strip across the
-// top with a CAPS state label, sitting on pure-black canvas. No tail
-// — Apple Watch cards float; no border line either, contrast comes
-// from the fill darker than canvas.
-void drawBubbleCard(uint16_t accent, const char* state_label) {
-  M5.Lcd.fillRoundRect(BUBBLE_X, BUBBLE_Y, BUBBLE_W, BUBBLE_H,
-                       BUBBLE_R, CARD_FILL);
-  // Header strip — rounded at top (matches card), square at bottom.
-  // Paint rounded rect first (gives the top corners), then a plain
-  // rect over the lower portion gives the square bottom edge.
-  M5.Lcd.fillRoundRect(BUBBLE_X, BUBBLE_Y, BUBBLE_W, BUBBLE_HEAD_H,
-                       BUBBLE_R, accent);
-  M5.Lcd.fillRect(BUBBLE_X, BUBBLE_Y + BUBBLE_R,
-                  BUBBLE_W, BUBBLE_HEAD_H - BUBBLE_R, accent);
-  // Hairline divider beneath the strip.
-  M5.Lcd.drawFastHLine(BUBBLE_X + 1, BUBBLE_Y + BUBBLE_HEAD_H,
-                       BUBBLE_W - 2, CARD_DIV);
+// Animal-Crossing card primitive: a warm cream surface with a 2px
+// border and the signature flat offset drop-shadow (box-shadow:
+// 0 Npx 0 0 — no blur). Painted as three stacked smooth rounded
+// rects: shadow (offset down), border, then the fill inset by the
+// border width. Clears its own footprint (card + shadow) to the dark
+// canvas first so repaints don't leave halos.
+void drawAcnhCard(int x, int y, int w, int h, int r, uint16_t fill) {
+  M5.Lcd.fillRect(x, y, w, h + CARD_SHADOW_DY, SCREEN_BG);
+  M5.Lcd.fillSmoothRoundRect(x, y + CARD_SHADOW_DY, w, h, r, CARD_SHADOW);
+  M5.Lcd.fillSmoothRoundRect(x, y, w, h, r, CARD_BORDER);
+  M5.Lcd.fillSmoothRoundRect(x + CARD_BW, y + CARD_BW,
+                             w - 2 * CARD_BW, h - 2 * CARD_BW,
+                             r - CARD_BW, fill);
+}
 
-  // State label, all caps, black on accent for high contrast.
-  M5.Lcd.setTextColor(SCREEN_BG, accent);
+// Bubble = an ACNH cream card with an accent header strip (state
+// colour) carrying the CAPS state label, msg body below. Header sits
+// inside the 2px border, rounded at top to match, square at bottom.
+void drawBubbleCard(uint8_t state) {
+  uint16_t accent = accentForState(state);
+  drawAcnhCard(BUBBLE_X, BUBBLE_Y, BUBBLE_W, BUBBLE_H, BUBBLE_R, CARD_FILL);
+
+  int sx = BUBBLE_X + CARD_BW;
+  int sy = BUBBLE_Y + CARD_BW;
+  int sw = BUBBLE_W - 2 * CARD_BW;
+  int sr = BUBBLE_R - CARD_BW;
+  M5.Lcd.fillSmoothRoundRect(sx, sy, sw, BUBBLE_HEAD_H, sr, accent);
+  M5.Lcd.fillRect(sx, sy + sr, sw, BUBBLE_HEAD_H - sr, accent);
+  // Divider between the strip and the body.
+  M5.Lcd.drawFastHLine(sx, sy + BUBBLE_HEAD_H, sw, CARD_DIV);
+
+  // CAPS state label — white on saturated accents, brown on yellow.
+  M5.Lcd.setTextColor(headerTextForState(state), accent);
   M5.Lcd.setTextDatum(middle_left);
   M5.Lcd.setTextSize(1);
   M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
-  M5.Lcd.drawString(state_label,
-                    BUBBLE_X + 10,
-                    BUBBLE_Y + BUBBLE_HEAD_H / 2);
+  M5.Lcd.drawString(labelForState(state),
+                    sx + 8, sy + BUBBLE_HEAD_H / 2);
 }
 
-// HUD: two rows on a black bar.
-//   row 1 (caps grey label "ACTIVITY"  ……  "TOKENS"-rt)
-//   row 2 (white bold "R 2 · W 0"      ……  "12.4k"-rt accent)
-void drawHud(int running, int waiting, uint32_t tokens, uint16_t accent) {
-  M5.Lcd.fillRect(0, HUD_Y, M5.Lcd.width(), HUD_H, SCREEN_BG);
+// HUD = a single ACNH cream card spanning the top: R/W counters left,
+// token count right, warm brown text on cream. One row — ACNH UIs
+// favour chunky single-line readouts over tiny stacked caps labels.
+void drawHud(int running, int waiting, uint32_t tokens) {
+  int x = 4;
+  int w = M5.Lcd.width() - 8;
+  drawAcnhCard(x, HUD_Y, w, HUD_H, HUD_H / 2, CARD_FILL);
 
-  M5.Lcd.setTextColor(TEXT_CAPS, SCREEN_BG);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setFont(&fonts::Font2);   // small caps-friendly bitmap font
-  M5.Lcd.setTextDatum(top_left);
-  M5.Lcd.drawString("ACTIVITY", HUD_PAD_X, HUD_Y + 2);
-  M5.Lcd.setTextDatum(top_right);
-  M5.Lcd.drawString("TOKENS",
-                    M5.Lcd.width() - HUD_PAD_X, HUD_Y + 2);
+  int text_y = HUD_Y + HUD_H / 2;
+  int pad    = CARD_BW + 10;
 
   char left[24];
-  snprintf(left, sizeof(left), "R %d  W %d", running, waiting);
-  M5.Lcd.setTextColor(TEXT_PRI, SCREEN_BG);
-  M5.Lcd.setTextDatum(top_left);
-  M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
-  M5.Lcd.drawString(left, HUD_PAD_X, HUD_Y + 16);
+  snprintf(left, sizeof(left), "R %d   W %d", running, waiting);
+  M5.Lcd.setTextColor(CARD_TEXT, CARD_FILL);
+  M5.Lcd.setTextDatum(middle_left);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setFont(&fonts::FreeSansBold12pt7b);
+  M5.Lcd.drawString(left, x + pad, text_y);
 
-  char right[16];
+  char right[20];
   if (tokens >= 1000) {
-    snprintf(right, sizeof(right), "%lu.%luk",
+    snprintf(right, sizeof(right), "%lu.%luk tok",
              (unsigned long)(tokens / 1000),
              (unsigned long)((tokens / 100) % 10));
   } else {
-    snprintf(right, sizeof(right), "%lu", (unsigned long)tokens);
+    snprintf(right, sizeof(right), "%lu tok", (unsigned long)tokens);
   }
-  M5.Lcd.setTextColor(accent, SCREEN_BG);
-  M5.Lcd.setTextDatum(top_right);
-  M5.Lcd.drawString(right, M5.Lcd.width() - HUD_PAD_X, HUD_Y + 16);
-
-  // Hairline divider at very bottom of HUD.
-  M5.Lcd.drawFastHLine(0, HUD_Y + HUD_H - 1, M5.Lcd.width(), CARD_DIV);
+  M5.Lcd.setTextColor(CARD_TEXT_SEC, CARD_FILL);
+  M5.Lcd.setTextDatum(middle_right);
+  M5.Lcd.drawString(right, x + w - pad, text_y);
 }
 
-// Full-pill chip, dark surface with a leading accent dot.
+// Tool chip = a small ACNH cream pill with a leading accent dot and
+// the uppercased tool name in warm brown.
 void drawToolChip(uint16_t accent) {
   if (!g_tool[0]) {
+    // Clear the chip footprint (incl. shadow) back to the canvas.
     M5.Lcd.fillRect(TOOL_CHIP_X, TOOL_CHIP_Y,
-                    TOOL_CHIP_W, TOOL_CHIP_H, SCREEN_BG);
+                    TOOL_CHIP_W, TOOL_CHIP_H + CARD_SHADOW_DY, SCREEN_BG);
     return;
   }
-  M5.Lcd.fillRoundRect(TOOL_CHIP_X, TOOL_CHIP_Y,
-                       TOOL_CHIP_W, TOOL_CHIP_H, TOOL_CHIP_R, CARD_FILL);
-  // Leading dot.
-  int dot_cx = TOOL_CHIP_X + 14;
-  int dot_cy = TOOL_CHIP_Y + TOOL_CHIP_H / 2;
-  M5.Lcd.fillCircle(dot_cx, dot_cy, 4, accent);
+  drawAcnhCard(TOOL_CHIP_X, TOOL_CHIP_Y, TOOL_CHIP_W, TOOL_CHIP_H,
+               TOOL_CHIP_R, CARD_FILL);
 
-  // Uppercase the tool name for the SF Caps feel.
+  int dot_cx = TOOL_CHIP_X + CARD_BW + 12;
+  int dot_cy = TOOL_CHIP_Y + TOOL_CHIP_H / 2;
+  M5.Lcd.fillSmoothCircle(dot_cx, dot_cy, 4, accent);
+
+  // Uppercase the tool name.
   char buf[24];
   size_t n = 0;
   for (const char* p = g_tool; *p && n < sizeof(buf) - 1; p++, n++) {
@@ -464,12 +482,12 @@ void drawToolChip(uint16_t accent) {
   }
   buf[n] = 0;
 
-  M5.Lcd.setTextColor(TEXT_PRI, CARD_FILL);
+  M5.Lcd.setTextColor(CARD_TEXT, CARD_FILL);
   M5.Lcd.setTextDatum(middle_left);
   M5.Lcd.setTextSize(1);
   M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
-  int text_x      = dot_cx + 10;
-  int text_max_w  = TOOL_CHIP_X + TOOL_CHIP_W - 12 - text_x;
+  int text_x     = dot_cx + 10;
+  int text_max_w = TOOL_CHIP_X + TOOL_CHIP_W - CARD_BW - 10 - text_x;
   while (M5.Lcd.textWidth(buf) > text_max_w && strlen(buf) > 1) {
     size_t L = strlen(buf);
     buf[L - 1] = 0;
@@ -493,14 +511,14 @@ void paintStatusBarIfChanged() {
   if (!msg_dirty && !stats_dirty && !accent_dirty) return;
 
   if (msg_dirty || accent_dirty) {
-    drawBubbleCard(accent, labelForState(g_cur_state));
-    M5.Lcd.setTextColor(TEXT_PRI, CARD_FILL);
+    drawBubbleCard(g_cur_state);
+    M5.Lcd.setTextColor(CARD_TEXT, CARD_FILL);
     M5.Lcd.setTextDatum(top_left);
     M5.Lcd.setTextSize(1);
     M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
-    // Body area starts below the header strip.
-    int body_y = BUBBLE_Y + BUBBLE_HEAD_H + BUBBLE_PAD;
-    int body_h = BUBBLE_H - BUBBLE_HEAD_H - 2 * BUBBLE_PAD;
+    // Body area starts below the header strip + border inset.
+    int body_y = BUBBLE_Y + CARD_BW + BUBBLE_HEAD_H + BUBBLE_PAD;
+    int body_h = BUBBLE_H - CARD_BW - BUBBLE_HEAD_H - 2 * BUBBLE_PAD;
     int max_lines = body_h / 16;   // line_h=16 → 7 lines in 112px
     drawWrapped(g_msg,
                 BUBBLE_X + BUBBLE_PAD, body_y,
@@ -511,7 +529,7 @@ void paintStatusBarIfChanged() {
   }
 
   if (stats_dirty || accent_dirty) {
-    drawHud(g_running, g_waiting, g_tokens, accent);
+    drawHud(g_running, g_waiting, g_tokens);
     drawToolChip(accent);
     strncpy(g_stats_drawn, combined, sizeof(g_stats_drawn) - 1);
     g_stats_drawn[sizeof(g_stats_drawn) - 1] = 0;
