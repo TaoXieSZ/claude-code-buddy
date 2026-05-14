@@ -1,9 +1,21 @@
 # claude-code-buddy
 
-Firmware + desktop daemons for an M5StickC PLUS2 that mirror the state
-of an AI coding session over BLE. Driven by the same wire protocol
-upstream Claude Desktop uses; this fork adds two new producer daemons
-so the same stick can also be driven by Claude Code (CLI) or Cursor (IDE).
+<p align="center">
+  <img src="docs/hero.png" alt="Three M5 hardware form factors — Plus2 stick on a BugC2 chassis, a bare M5Stick, and a CoreS3 StackChan — surrounded by ClaudeCode, Codex, DeepSeek, and Cursor brand marks" width="820">
+</p>
+
+Firmware + desktop daemons for **M5 hardware** that mirror the state
+of an AI coding session over BLE. Two firmware targets, all driven by
+the same wire protocol upstream Claude Desktop uses; this fork adds
+producer daemons so the same hardware can also be driven by Claude
+Code (CLI) or Cursor (IDE):
+
+- **M5StickC Plus2** — pocketable 1.14" LCD, optional BugC2 robot
+  chassis. The original target; widest producer support.
+- **M5Stack StackChan (CoreS3)** — desktop pet with 2.0" display,
+  two feedback servos, 12 RGB LEDs, 1W speaker. New target — *speaks*
+  hook events via preloaded WAV clips, dances head/body on state
+  changes, configurable from a localhost dashboard.
 
 | Producer | Implementation | Notes |
 |---|---|---|
@@ -64,8 +76,10 @@ persona engine.
 Pick the producer you want and run that lane. Each is self-contained;
 you don't need any of the others.
 
-Prereqs (all lanes): macOS, an M5StickC Plus2, [PlatformIO Core][pio]
-(`brew install platformio` or `pipx install platformio`).
+Prereqs (all lanes): macOS, an **M5StickC Plus2** *or* an **M5Stack
+StackChan (CoreS3)**, [PlatformIO Core][pio] (`brew install platformio`
+or `pipx install platformio`). StackChan-specific flash steps live
+under [StackChan (CoreS3)](#stackchan-cores3) below.
 
 [pio]: https://docs.platformio.org/en/latest/core/installation/methods/
 
@@ -104,25 +118,39 @@ don't fight for advertisements. See
 
 ## Hardware
 
-This fork targets:
+This fork targets two M5 platforms:
 
-- **M5StickC Plus2** controller (Plus and original StickC also build via the
-  M5Unified runtime check, but Plus2 is the primary; see notes in `m5_compat.h`)
+**M5StickC Plus2** (primary stick target)
+- Plus and original StickC also build via the M5Unified runtime check,
+  but Plus2 is the primary — see notes in `m5_compat.h`
 - **BugC2 chassis** (optional) — programmable robot base, 4 DC motors,
-  2 RGB LEDs, STM32F030F4P6 over I2C 0x38
+  2 RGB LEDs, STM32F030F4P6 over I2C 0x38. Stick boots fine without
+  BugC2 — the driver probes 0x38 at startup and skips silently if
+  absent.
 
-Stick boots fine without BugC2 — the chassis driver probes 0x38 at startup
-and skips silently if not present.
+**M5Stack StackChan (CoreS3)** (new desktop pet target)
+- CoreS3 head: ESP32-S3, 16 MB flash, 8 MB PSRAM, 2.0" touch LCD,
+  Wi-Fi/BLE
+- Body BSP: 2 feedback servos (X horizontal continuous 360°, Y vertical
+  90°), 12 RGB LEDs, 1 W speaker, 3-zone capacitive touch, IR, NFC,
+  INA226 power monitor
+- Speaks hook events via preloaded ElevenLabs WAV clips (mirrored from
+  [`shanraisshan/claude-code-hooks`](https://github.com/shanraisshan/claude-code-hooks))
+- Localhost dashboard at `http://127.0.0.1:18765/` for live tuning of
+  volume / brightness / character pack / motion toggles. Settings
+  persist on the device via NVS.
 
 ## Flashing
 
-Three PlatformIO envs — pick by which producer the stick will pair with:
+Five PlatformIO envs — pick by hardware *and* by which producer:
 
-| Env | BLE name | Default char | Use with |
-|---|---|---|---|
-| `m5stickc-plus2-claude` | `Claude-XXXX` | `clawd` | Claude Desktop (Lane A) or cc-bridge (Lane B) |
-| `m5stickc-plus2-cursor` | `Cursor-XXXX` | `clawd` | cursor-bridge (Lane C) |
-| `m5stickc-plus2`        | `Claude-XXXX` | scans LittleFS for any pack | legacy/plain — no baked-in defaults |
+| Env | Hardware | BLE name | Default char | Use with |
+|---|---|---|---|---|
+| `m5stickc-plus2-claude`  | Plus2   | `Claude-XXXX`     | `clawd`     | Claude Desktop (Lane A) or cc-bridge (Lane B) |
+| `m5stickc-plus2-cursor`  | Plus2   | `Cursor-XXXX`     | `clawd`     | cursor-bridge (Lane C) |
+| `m5stickc-plus2`         | Plus2   | `Claude-XXXX`     | autodetect  | legacy/plain — no baked-in defaults |
+| `cores3-stackchan-claude`| CoreS3  | `Claude-SC-XXXX`  | `cloudling` | cc-bridge — see [StackChan (CoreS3)](#stackchan-cores3) |
+| `cores3-stackchan-cursor`| CoreS3  | `Cursor-SC-XXXX`  | `cloudling` | cursor-bridge — see [StackChan (CoreS3)](#stackchan-cores3) |
 
 Flash firmware **and** the LittleFS character pack in one shot:
 
@@ -149,6 +177,82 @@ Two sticks attached at once? See
 [`docs/onboarding-next-stick.md`](docs/onboarding-next-stick.md) for
 pinning each env to a specific USB port via `upload_port` in
 `platformio.ini`.
+
+## StackChan (CoreS3)
+
+The desktop-pet target. Same wire protocol as the Plus2 stick, but with
+face GIFs on a 320×240 LCD, voice clips through the 1 W speaker, and
+servo dance patterns driving the two-axis head. Settings live behind a
+localhost web dashboard.
+
+### Flash (firmware + filesystem)
+
+```bash
+pio run -e cores3-stackchan-claude -t upload -t uploadfs --upload-port /dev/cu.usbmodem<NN>
+```
+
+The CoreS3 enumerates as a native USB CDC device, so the port name is
+`/dev/cu.usbmodem*` (not the `usbserial-*` that the Plus2 uses).
+
+`uploadfs` pushes `data/` to a 3.5 MB LittleFS partition. The default
+PlatformIO `default_16MB.csv` reserves most of the flash for an OTA
+backup partition, so the user-data side is tight — keep `data/` lean
+(default ships with one character pack + 33 WAV clips, ~2 MB).
+
+### Wire it to the cc-bridge daemon
+
+cc-bridge scans by BLE name prefix. The default `Claude-` matches a
+Plus2 stick; StackChan advertises `Claude-SC-XXXX`. Override via env
+var (or comma-separate to drive both at once):
+
+```xml
+<!-- ~/Library/LaunchAgents/com.cc-bridge.plist -->
+<key>CC_BRIDGE_DEVICE_PREFIX</key>
+<string>Claude-SC-</string>                <!-- StackChan only -->
+<!-- or -->
+<string>Claude-F7C2,Claude-SC-</string>    <!-- multi-peer -->
+```
+
+Reload after editing: `launchctl unload ~/Library/LaunchAgents/com.cc-bridge.plist && launchctl load …`.
+
+### Dashboard
+
+Once `cc-bridge` is running, the dashboard is at:
+
+```
+http://127.0.0.1:18765/
+```
+
+Sliders for volume and screen brightness; dropdown for character pack
+(populated from `data/characters/`); toggles for servo motion master
+switch and idle-wiggle. Each change POSTs through the daemon over BLE
+and is persisted on the device in NVS — survives reboots.
+
+Override port via `CC_BRIDGE_DASH_PORT=<n>` in the plist; set to `0`
+to disable the dashboard.
+
+### Sound clips
+
+WAV clips for all 27 Claude Code hook events plus the agent_* variants
+live under `data/sounds/`. Voices are pre-recorded ElevenLabs cuts
+from [`shanraisshan/claude-code-hooks`](https://github.com/shanraisshan/claude-code-hooks)
+(MIT, "Samara X" voice). Resampled to 16 kHz mono 16-bit so the full
+set fits the LittleFS partition.
+
+Add new clips by dropping `<eventname>.wav` into `data/sounds/` and
+re-running `uploadfs` — the firmware enumerates the directory at boot,
+no rebuild needed.
+
+### Notes
+
+- USB-C bus alone is at the edge of the current budget when both
+  servos run flat-out; the firmware caps move speed at 500 (out of 1000)
+  for steady patterns and only briefly hits 800 on CELEBRATE.
+- The cloudling character pack is the default; clawd works on CoreS3
+  too if you copy `characters/clawd/` into `data/characters/` and
+  rebuild with `-DBUDDY_DEFAULT_CHAR=\"clawd\"`. Calico's GIFs hit a
+  green-channel rendering bug on the CoreS3 LCD (still
+  unidentified) — re-encoding pending.
 
 ## Pairing
 
