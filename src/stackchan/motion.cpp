@@ -26,54 +26,58 @@ struct Step {
 
 // Patterns. Sentinel (dwell=0) marks loop point — when reached, restart.
 // Speeds tuned conservatively; one pattern (CELEBRATE) goes fast.
-const Step PAT_SLEEP[]     = { {0,   450, 200,  10000}, {0, 0, 0, 0} };
+// Y geometry: BSP doc has Y range 0..900 = 0°..90° where 0 looks DOWN
+// (chin to chest) and 900 looks straight UP. The original patterns hovered
+// around y=450 (mid) — visually the face was tilted half-way down, which
+// means the LCD is angled away from a desk-sitting user. Bumped all
+// baselines into the 700–850 range so the screen always faces up at the
+// human. Sub-state variation (nod/look-around) still happens, just stays
+// in the "head up" half of the workspace.
+const Step PAT_SLEEP[]     = { {0,   780, 200,  10000}, {0, 0, 0, 0} };
 const Step PAT_IDLE[]      = {
-  {0,   450, 200, 4000},     // home, breathe
-  {300, 500, 250, 1500},     // peek right
-  {-300,500, 250, 1500},     // peek left
-  {0,   450, 200, 5000},     // home, settle
+  {0,   800, 200, 4000},     // home (head up), breathe
+  {300, 820, 250, 1500},     // peek right
+  {-300,820, 250, 1500},     // peek left
+  {0,   800, 200, 5000},     // back to head-up center, settle
   {0, 0, 0, 0}
 };
 const Step PAT_BUSY[]      = {
-  // Earlier this was a 600ms-dwell back-and-forth — sounded great
-  // visually but the servo never got to silence (motor constantly
-  // working) and noise dominated. Smaller amplitude (±10° instead of
-  // ±20°), slower speed, and a 3.5s rest step give the same "alive"
-  // feel with most of the time spent in actual silence.
-  {0, 550, 200, 900},        // gentle up
-  {0, 450, 200, 900},        // gentle down
-  {0, 500, 200, 3500},       // hold center, rest (quiet)
+  // ±10° amplitude around the head-up baseline; same slow speed +
+  // 3.5s rest as before so the servos still get quiet between nods.
+  {0, 850, 200, 900},        // gentle nod-up
+  {0, 750, 200, 900},        // gentle nod-down (still above mid)
+  {0, 800, 200, 3500},       // hold head-up center, rest
   {0, 0, 0, 0}
 };
 const Step PAT_ATTENTION[] = {
-  {800, 600, 500, 600},      // look right
-  {-800,600, 500, 600},      // look left
+  {800, 850, 500, 600},      // look right + alert head-up
+  {-800,850, 500, 600},      // look left + alert head-up
   {0, 0, 0, 0}
 };
 const Step PAT_CELEBRATE[] = {
-  {600, 700, 800, 250},
-  {-600,700, 800, 250},
-  {600, 250, 800, 250},
-  {-600,250, 800, 250},
-  {0,   500, 400, 800},
+  {600, 870, 800, 250},
+  {-600,870, 800, 250},
+  {600, 750, 800, 250},
+  {-600,750, 800, 250},
+  {0,   820, 400, 800},
   {0, 0, 0, 0}
 };
 const Step PAT_DIZZY[]     = {
-  {500,  300, 700, 250},
-  {-500, 700, 700, 250},
-  {500,  700, 700, 250},
-  {-500, 300, 700, 250},
+  {500,  720, 700, 250},
+  {-500, 870, 700, 250},
+  {500,  870, 700, 250},
+  {-500, 720, 700, 250},
   {0, 0, 0, 0}
 };
 const Step PAT_HEART[]     = {
-  {400, 550, 200, 1200},
-  {-400,550, 200, 1200},
+  {400, 820, 200, 1200},
+  {-400,820, 200, 1200},
   {0, 0, 0, 0}
 };
-// "Quiet" pattern used when idle_wiggle is disabled. Single step that
-// just sits at home with a long re-arm so the servos never twitch.
+// "Quiet" pattern when idle_wiggle is disabled. Head-up rest position,
+// long re-arm so the servos never twitch.
 const Step PAT_IDLE_QUIET[] = {
-  {0, 450, 200, 60000},      // home, sit for a minute, loop
+  {0, 800, 200, 60000},      // head-up center, hold for a minute, loop
   {0, 0, 0, 0}
 };
 
@@ -103,8 +107,10 @@ void issueStep(const Step& s) {
 void motionInit() {
   ::M5StackChan.begin();
   ::M5StackChan.setServoPowerEnabled(true);
-  // Go home explicitly so user gets a visible "hello" on boot.
-  ::M5StackChan.Motion.goHome();
+  // BSP's goHome() parks at (0, 0) — Y=0 looks straight down, hiding
+  // the screen from a desk-sitting user. We override to (0, 800) so
+  // the head defaults to looking up, screen presented to the user.
+  ::M5StackChan.Motion.move(0, 800, 250);
   g_next_at = millis() + 1000;
 }
 
@@ -126,9 +132,9 @@ void motionSetState(uint8_t state) {
 void motionSetEnabled(bool on) {
   g_master_enabled = on;
   if (!on) {
-    // Park and stop. Servos stay powered (so they hold home), pattern
-    // playback halts.
-    ::M5StackChan.Motion.goHome();
+    // Park at head-up so disabling motion still leaves the screen
+    // facing the user, not the desk. Servos stay powered to hold pose.
+    ::M5StackChan.Motion.move(0, 800, 250);
     g_running = false;
   } else if (g_state < CHAR_N_STATES) {
     // Resume: recompute pattern for current state.
