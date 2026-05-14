@@ -1,0 +1,25 @@
+[project]
+name = "claude-desktop-buddy-tools"
+version = "0.0.0"
+description = "Bridge daemons + tooling for the claude-desktop-buddy firmware"
+requires-python = ">=3.10"
+# Runtime deps the daemons need. bleak is pure-Python and imports without
+# hardware; pyobjc-Quartz is macOS-only (the PTT key relay) and gated so
+# Linux CI can still install the dev set.
+dependencies = [
+    "bleak",
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Not a distributable package — just dependency + test config. Stop
+# setuptools from auto-discovering src/ and tools/ as packages.
+[tool.setuptools]
+py-modules = []
