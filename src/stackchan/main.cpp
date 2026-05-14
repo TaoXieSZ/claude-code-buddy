@@ -164,9 +164,10 @@ static void applyJsonLine(const char* line) {
   bool is_done = false;
   uint8_t next = mapState(doc, &is_done);
   if (is_done) {
-    // Hold celebrate ~1.5s so the wag is visible even when "done" fires
-    // immediately after "running" — otherwise next msg overwrites it.
-    g_celebrate_until = millis() + 1500;
+    // Hold celebrate ~2.8s so the full CELEBRATE dance — wind-up + the
+    // 360° spin (转一圈) + settle + wiggle — completes before we fall
+    // back to IDLE. Was 1.5s (pre-spin), which cut the spin off midway.
+    g_celebrate_until = millis() + 2800;
   }
   if (next != g_cur_state) {
     g_cur_state = next;
