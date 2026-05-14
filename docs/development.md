@@ -14,6 +14,21 @@ pip install -e ".[dev]"
 # this repo was set up with @fission-ai/openspec (core profile).
 ```
 
+## Reloading the daemons after a Python change
+
+The bridge daemons run under launchd and **do not hot-reload** — a long-lived
+process keeps the old `bridge.py` / `buddy_core` in memory. After editing any
+daemon Python, restart it or your change silently won't take effect:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.cc-bridge      # cc-bridge
+# cursor-bridge is the user's own side — don't auto-restart it
+```
+
+The statusline proxy (`statusline_hud.py`) is the exception: Claude Code spawns
+it fresh on every render, so edits there take effect on the next statusline tick
+— no restart needed.
+
 ## Running tests
 
 ```bash
