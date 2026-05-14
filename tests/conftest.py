@@ -39,6 +39,7 @@ import buddy_core.core as _buddy_core_core  # noqa: E402
 
 _cc_bridge = _load("cc_bridge", _TOOLS / "cc-bridge" / "bridge.py")
 _cursor_bridge = _load("cursor_bridge", _TOOLS / "cursor-bridge" / "bridge.py")
+_statusline_hud = _load("statusline_hud", _TOOLS / "cc-bridge" / "statusline_hud.py")
 
 
 @pytest.fixture
@@ -61,6 +62,12 @@ def cc():
 def cursor():
     """The cursor-bridge module (`tools/cursor-bridge/bridge.py`)."""
     return _cursor_bridge
+
+
+@pytest.fixture
+def statusline_hud():
+    """The statusline proxy module (`tools/cc-bridge/statusline_hud.py`)."""
+    return _statusline_hud
 
 
 @pytest.fixture

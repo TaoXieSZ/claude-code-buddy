@@ -25,6 +25,23 @@ def test_to_payload_prompt_omitted_when_none(fresh_state):
     assert fresh_state.to_payload()["prompt"]["tool"] == "Bash"
 
 
+def test_to_payload_carries_hud_fields(fresh_state):
+    # HUD metrics are state, not one-shot — every heartbeat carries them.
+    fresh_state.context_pct = 62
+    fresh_state.model = "Opus 4.7"
+    fresh_state.limit_5h = 38
+    fresh_state.limit_7d = 13
+    fresh_state.session_ms = 1234567
+    p = fresh_state.to_payload()
+    assert p["context_pct"] == 62
+    assert p["model"] == "Opus 4.7"
+    assert p["limit_5h"] == 38
+    assert p["limit_7d"] == 13
+    assert p["session_ms"] == 1234567
+    # Still present (unchanged) on the next heartbeat.
+    assert fresh_state.to_payload()["context_pct"] == 62
+
+
 def test_to_payload_completed_is_one_shot(fresh_state):
     fresh_state.completed = True
     assert fresh_state.to_payload().get("completed") is True

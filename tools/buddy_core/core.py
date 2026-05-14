@@ -58,6 +58,15 @@ class BuddyState:
     # cleared the same way `completed` is. Stays None on most ticks.
     pending_play: str | None = None
 
+    # HUD metrics — populated by the cc-bridge `hud` event from Claude
+    # Code's statusline stdin (see openspec change 0002). Current state,
+    # not one-shot: emitted on every heartbeat.
+    context_pct: int = 0   # context window used %
+    model: str = ""        # active model display name
+    limit_5h: int = 0      # rolling 5h rate-limit used %
+    limit_7d: int = 0      # rolling 7d rate-limit used %
+    session_ms: int = 0    # session elapsed time, milliseconds
+
     # internal — not sent
     # session_id -> {"running": bool, ...}  (bridges may add "last_seen")
     _sessions: dict = field(default_factory=dict)
@@ -71,6 +80,11 @@ class BuddyState:
             "entries": self.entries[:8],
             "tokens": self.tokens,
             "tokens_today": self.tokens_today,
+            "context_pct": self.context_pct,
+            "model": self.model,
+            "limit_5h": self.limit_5h,
+            "limit_7d": self.limit_7d,
+            "session_ms": self.session_ms,
         }
         if self.completed:
             p["completed"] = True

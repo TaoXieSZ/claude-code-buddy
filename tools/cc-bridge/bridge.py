@@ -102,7 +102,10 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
     # (sound.cpp only loads .wav files present on disk). Specific event
     # handlers below MAY override pending_play with a more specific clip
     # name if that turns out useful, but for now 1:1 mapping is enough.
-    if name:
+    # `hud` is pure metric telemetry from the statusline proxy — no sound
+    # cue (there's no hud.wav and a blip on every statusline render would
+    # be maddening).
+    if name and name != "hud":
         state.pending_play = name.lower()
         changed = True  # heartbeat must emit so firmware gets the cue
 
@@ -208,6 +211,22 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
 
     elif name == "PostCompact":
         state.add_entry("compacted")
+        changed = True
+
+    elif name == "hud":
+        # Live statusline metrics from tools/cc-bridge/statusline_hud.py.
+        # Pure telemetry — copy each present field onto state, leave the
+        # session/running/waiting lifecycle untouched. Missing fields are
+        # left at their previous value so a partial payload doesn't zero
+        # things out. See openspec change 0002-hud-metrics-integration.
+        for fld in ("context_pct", "tokens", "limit_5h", "limit_7d",
+                    "session_ms"):
+            v = ev.get(fld)
+            if isinstance(v, int):
+                setattr(state, fld, v)
+        m = ev.get("model")
+        if isinstance(m, str) and m:
+            state.model = m
         changed = True
 
     return changed

@@ -143,3 +143,46 @@ def test_waiting_clears_on_new_user_prompt(cc, fresh_state):
 def test_post_compact_adds_entry(cc, fresh_state):
     cc.apply_event(fresh_state, ev("PostCompact"))
     assert fresh_state.entries[0] == "compacted"
+
+
+# ─── hud metrics event (Change 0002) ─────────────────────────────────
+
+def test_hud_event_populates_metric_fields(cc, fresh_state):
+    changed = cc.apply_event(fresh_state, {
+        "hook_event_name": "hud",
+        "context_pct": 62, "tokens": 48000,
+        "limit_5h": 38, "limit_7d": 13,
+        "model": "Opus 4.7", "session_ms": 1234567,
+    })
+    assert changed is True
+    assert fresh_state.context_pct == 62
+    assert fresh_state.tokens == 48000
+    assert fresh_state.limit_5h == 38
+    assert fresh_state.limit_7d == 13
+    assert fresh_state.model == "Opus 4.7"
+    assert fresh_state.session_ms == 1234567
+
+
+def test_hud_partial_event_leaves_missing_fields_untouched(cc, fresh_state):
+    fresh_state.model = "Opus 4.7"
+    cc.apply_event(fresh_state, {"hook_event_name": "hud", "context_pct": 70})
+    assert fresh_state.context_pct == 70
+    assert fresh_state.model == "Opus 4.7"   # not clobbered by an absent field
+
+
+def test_hud_event_does_not_disturb_lifecycle(cc, fresh_state):
+    cc.apply_event(fresh_state, ev("SessionStart"))
+    cc.apply_event(fresh_state, ev("UserPromptSubmit"))
+    cc.apply_event(fresh_state, ev("PermissionRequest", tool_name="Bash",
+                                   request_id="r1"))
+    assert fresh_state.running == 1 and fresh_state.waiting == 1
+    cc.apply_event(fresh_state, {"hook_event_name": "hud", "context_pct": 50})
+    # Pure telemetry — must not touch running/waiting.
+    assert fresh_state.running == 1
+    assert fresh_state.waiting == 1
+
+
+def test_hud_event_fires_no_sound_cue(cc, fresh_state):
+    cc.apply_event(fresh_state, {"hook_event_name": "hud", "context_pct": 50})
+    # `hud` is telemetry — no /sounds/hud.wav blip on every statusline render.
+    assert fresh_state.pending_play is None
