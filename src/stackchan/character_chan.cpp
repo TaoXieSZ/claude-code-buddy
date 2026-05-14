@@ -13,6 +13,7 @@
 // instead.
 
 #include "character_chan.h"
+#include "color_util.h"   // parseHexColor, blend565 — unit-tested off-device
 #include <M5Unified.h>
 #include <LittleFS.h>
 #include <AnimatedGIF.h>
@@ -141,15 +142,7 @@ char         g_stats_drawn[64] = "";   // last rendered stats line
 // scaled to height 170 → ~172 wide. 360 is comfortable headroom.
 uint16_t     g_line[360];
 
-// --- Helpers ---------------------------------------------------------------
-uint16_t parseHexColor(const char* s, uint16_t fb) {
-  if (!s || !*s) return fb;
-  if (*s == '#') s++;
-  uint32_t v = strtoul(s, nullptr, 16);
-  return (uint16_t)(((v >> 19) & 0x1F) << 11 |
-                    ((v >> 10) & 0x3F) << 5  |
-                    ((v >> 3)  & 0x1F));
-}
+// parseHexColor + blend565 live in color_util.h (pure, unit-tested).
 
 // --- AnimatedGIF file callbacks --------------------------------------------
 void* gifOpenCb(const char* fname, int32_t* pSize) {
@@ -173,23 +166,6 @@ int32_t gifSeekCb(GIFFILE* pFile, int32_t iPosition) {
   f->seek(iPosition);
   pFile->iPos = (int32_t)f->position();
   return pFile->iPos;
-}
-
-// Blend two RGB565 colours. frac is 0..256 fixed-point (256 = full b).
-// IMPORTANT: the GIF lib is initialised with GIF_PALETTE_RGB565_BE, so
-// pal[] entries are big-endian — on this little-endian CPU the raw
-// uint16_t has its bytes swapped vs. logical RGB565. The old NN path
-// copied pal[] through verbatim so byte order never mattered; here we
-// must interpret the bits, so bswap to logical layout, lerp channels,
-// bswap back to BE for pushImage. Cheap enough per pixel at ~180px.
-static inline uint16_t blend565(uint16_t a_be, uint16_t b_be, int frac) {
-  uint16_t a = __builtin_bswap16(a_be);
-  uint16_t b = __builtin_bswap16(b_be);
-  int inv = 256 - frac;
-  int r = (((a >> 11) & 0x1F) * inv + ((b >> 11) & 0x1F) * frac) >> 8;
-  int g = (((a >> 5)  & 0x3F) * inv + ((b >> 5)  & 0x3F) * frac) >> 8;
-  int bl= (( a        & 0x1F) * inv + ( b        & 0x1F) * frac) >> 8;
-  return __builtin_bswap16((uint16_t)((r << 11) | (g << 5) | bl));
 }
 
 // --- Per-scanline draw callback --------------------------------------------
