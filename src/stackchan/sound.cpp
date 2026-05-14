@@ -72,10 +72,11 @@ bool loadOne(const char* path, const char* fname) {
 
 void soundInit() {
   // M5.Speaker is initialized by M5.begin() for CoreS3 (AXP-managed
-  // amplifier wakes automatically). Volume range 0-255; 96 is audible
-  // without being shrill at desk distance.
-  M5.Speaker.setVolume(96);
-
+  // amplifier wakes automatically). Volume is owned by settings.cpp —
+  // settingsInit() runs before soundInit() in setup() and applies the
+  // NVS-saved level. Do NOT setVolume() here: an earlier hardcoded
+  // setVolume(96) clobbered the user's saved/dashboard level on every
+  // boot, so the volume slider appeared to "not stick".
   File root = LittleFS.open("/sounds");
   if (!root || !root.isDirectory()) {
     Serial.println("[snd] /sounds not found on LittleFS");
