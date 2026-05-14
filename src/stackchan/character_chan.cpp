@@ -165,10 +165,31 @@ int32_t gifSeekCb(GIFFILE* pFile, int32_t iPosition) {
   return pFile->iPos;
 }
 
+// Blend two RGB565 colours. frac is 0..256 fixed-point (256 = full b).
+// IMPORTANT: the GIF lib is initialised with GIF_PALETTE_RGB565_BE, so
+// pal[] entries are big-endian — on this little-endian CPU the raw
+// uint16_t has its bytes swapped vs. logical RGB565. The old NN path
+// copied pal[] through verbatim so byte order never mattered; here we
+// must interpret the bits, so bswap to logical layout, lerp channels,
+// bswap back to BE for pushImage. Cheap enough per pixel at ~180px.
+static inline uint16_t blend565(uint16_t a_be, uint16_t b_be, int frac) {
+  uint16_t a = __builtin_bswap16(a_be);
+  uint16_t b = __builtin_bswap16(b_be);
+  int inv = 256 - frac;
+  int r = (((a >> 11) & 0x1F) * inv + ((b >> 11) & 0x1F) * frac) >> 8;
+  int g = (((a >> 5)  & 0x3F) * inv + ((b >> 5)  & 0x3F) * frac) >> 8;
+  int bl= (( a        & 0x1F) * inv + ( b        & 0x1F) * frac) >> 8;
+  return __builtin_bswap16((uint16_t)((r << 11) | (g << 5) | bl));
+}
+
 // --- Per-scanline draw callback --------------------------------------------
-// Nearest-neighbor float scaling: for each source row, compute the
-// output Y range it covers and the doubled-width output row. Push each
-// covered output row to LCD via pushImage (line buffer).
+// Horizontal bilinear + vertical nearest-neighbor scaling. The GIF lib
+// hands us one source row at a time, so true vertical bilinear would
+// need cross-row buffering that breaks on GIFs' partial-row frame
+// updates (animation disposal). Horizontal bilinear is stateless and
+// removes the most visible artifact — horizontal stair-stepping — at
+// the ~1.0-1.5x upscale this layout uses. Vertical stays NN: the
+// output row range a source row covers is just replicated.
 void gifDrawCb(GIFDRAW* d) {
   uint16_t* pal  = d->pPalette;
   uint8_t*  src  = d->pPixels;
@@ -192,11 +213,22 @@ void gifDrawCb(GIFDRAW* d) {
     out_w = sizeof(g_line) / sizeof(g_line[0]);
   }
 
-  // Build the scaled output row (NN sample from src).
+  // Build the scaled output row — horizontal bilinear. For each output
+  // x, find the fractional source x, blend the two straddling source
+  // pixels. Transparent source pixels resolve to g_bg before blending,
+  // so character edges soften against the background instead of
+  // hard-stepping. inv_scale precomputed to avoid a divide per pixel.
+  float inv_scale = 1.0f / g_scale_f;
   for (int xo = 0; xo < out_w; xo++) {
-    int xi = (int)(xo / g_scale_f);
-    if (xi >= srcW) xi = srcW - 1;
-    g_line[xo] = (hasT && src[xi] == tc) ? g_bg : pal[src[xi]];
+    float    sx   = xo * inv_scale;
+    int      x0   = (int)sx;
+    int      x1   = x0 + 1;
+    int      frac = (int)((sx - x0) * 256.0f);
+    if (x0 >= srcW) x0 = srcW - 1;
+    if (x1 >= srcW) x1 = srcW - 1;
+    uint16_t c0 = (hasT && src[x0] == tc) ? g_bg : pal[src[x0]];
+    uint16_t c1 = (hasT && src[x1] == tc) ? g_bg : pal[src[x1]];
+    g_line[xo] = (c0 == c1) ? c0 : blend565(c0, c1, frac);
   }
 
   // Clip character draws to the CHAR_BOX region — stats bar at the
