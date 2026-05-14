@@ -100,32 +100,37 @@
     box-shadow: 0 4px 0 0 var(--card-shadow);
   }
 
-  /* HUD — one ACNH card spanning the top -------------------- */
+  /* HUD — 2-row ACNH card spanning the top (OMC-HUD metrics) -- */
   .hud {
     position: absolute;
     left: 4px; top: 2px;
-    width: 312px; height: 32px;
+    width: 312px; height: 50px;
     border-radius: 16px;
     background: var(--card-fill);
     border: 2px solid var(--card-border);
     box-shadow: 0 4px 0 0 var(--card-shadow);
-    display: flex; align-items: center;
-    justify-content: space-between;
+    display: flex; flex-direction: column;
+    justify-content: center; gap: 3px;
     padding: 0 12px;
   }
-  .hud .row1 { display: none; }   /* device HUD is single-row */
-  .hud .row2 { display: contents; }
-  .hud .row2 span {
+  .hud .row1, .hud .row2 {
+    display: flex; justify-content: space-between;
+  }
+  /* row 1: model · context%   row 2: session·tokens · 5h/7d */
+  .hud .row1 span {
     font: 700 12px/1 Nunito, -apple-system, sans-serif;
     color: var(--card-text);
   }
-  .hud .row2 .tokens { color: var(--card-text-sec); }
+  .hud .row2 span {
+    font: 700 11px/1 Nunito, -apple-system, sans-serif;
+    color: var(--card-text-sec);
+  }
 
   /* Char box -------------------------------------------------- */
   .face {
     position: absolute;
-    left: 4px; top: 40px;
-    width: 176px; height: 196px;
+    left: 4px; top: 58px;
+    width: 176px; height: 178px;
     border-radius: 8px;
     background:
       radial-gradient(circle at 50% 42%, var(--face-tint) 0%, #000 70%);
@@ -138,8 +143,8 @@
   /* Bubble card — ACNH cream card + accent header strip ------ */
   .card {
     position: absolute;
-    left: 184px; top: 44px;
-    width: 132px; height: 148px;
+    left: 184px; top: 60px;
+    width: 132px; height: 132px;
     background: var(--card-fill);
     border: 2px solid var(--card-border);
     box-shadow: 0 4px 0 0 var(--card-shadow);
@@ -259,8 +264,8 @@
     </div>
     <div class="screen"><div class="screen-inner">
       <div class="hud">
-        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
-        <div class="row2"><span>R 2  W 0</span><span class="tokens">12.4k</span></div>
+        <div class="row1"><span>Opus 4.7</span><span>62% ctx</span></div>
+        <div class="row2"><span>12m&nbsp;&nbsp;48.0k tok</span><span>5h 38%&nbsp;&nbsp;7d 13%</span></div>
       </div>
       <div class="face"><span class="emoji">🐾</span></div>
       <div class="card">
@@ -282,8 +287,8 @@
     </div>
     <div class="screen"><div class="screen-inner">
       <div class="hud">
-        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
-        <div class="row2"><span>R 0  W 1</span><span class="tokens">8.2k</span></div>
+        <div class="row1"><span>Opus 4.7</span><span>58% ctx</span></div>
+        <div class="row2"><span>9m&nbsp;&nbsp;41.2k tok</span><span>5h 36%&nbsp;&nbsp;7d 12%</span></div>
       </div>
       <div class="face"><span class="emoji">❗</span></div>
       <div class="card">
@@ -305,8 +310,8 @@
     </div>
     <div class="screen"><div class="screen-inner">
       <div class="hud">
-        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
-        <div class="row2"><span>R 0  W 0</span><span class="tokens">12.4k</span></div>
+        <div class="row1"><span>Opus 4.7</span><span>62% ctx</span></div>
+        <div class="row2"><span>14m&nbsp;&nbsp;48.4k tok</span><span>5h 40%&nbsp;&nbsp;7d 13%</span></div>
       </div>
       <div class="face"><span class="emoji">😺</span></div>
       <div class="card">
@@ -325,8 +330,8 @@
     </div>
     <div class="screen"><div class="screen-inner">
       <div class="hud">
-        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
-        <div class="row2"><span>R 0  W 0</span><span class="tokens">13.1k</span></div>
+        <div class="row1"><span>Opus 4.7</span><span>63% ctx</span></div>
+        <div class="row2"><span>15m&nbsp;&nbsp;49.1k tok</span><span>5h 41%&nbsp;&nbsp;7d 14%</span></div>
       </div>
       <div class="face"><span class="emoji">🎉</span></div>
       <div class="card">
@@ -348,8 +353,8 @@
     </div>
     <div class="screen"><div class="screen-inner">
       <div class="hud">
-        <div class="row1"><span>ACTIVITY</span><span>TOKENS</span></div>
-        <div class="row2"><span>R 0  W 0</span><span class="tokens">12.4k</span></div>
+        <div class="row1"><span>Opus 4.7</span><span>62% ctx</span></div>
+        <div class="row2"><span>30m&nbsp;&nbsp;48.4k tok</span><span>5h 40%&nbsp;&nbsp;7d 13%</span></div>
       </div>
       <div class="face"><span class="emoji">💤</span></div>
       <div class="card">
@@ -368,9 +373,9 @@
   <dl>
     <dt>Canvas</dt>            <dd>320 × 240, rotation 1 (landscape), dark canvas (#000000)</dd>
     <dt>ACNH card</dt>         <dd>cream fill <span class="swatch" style="background:#F7F3DF"></span>#F7F3DF · 2px border <span class="swatch" style="background:#AAA69D"></span>#AAA69D · flat offset shadow <span class="swatch" style="background:#BDAEA0"></span>#BDAEA0 (+4y, no blur)</dd>
-    <dt>HUD card</dt>          <dd>4,2 → 316,34 (312 × 32) · r=16 · single row · R/W brown left, token count secondary-brown right</dd>
-    <dt>Face box</dt>          <dd>4,40 → 180,236 (176 × 196) · GIF fit-into-box scaler, own dark box (unchanged)</dd>
-    <dt>Bubble card</dt>       <dd>184,44 → 316,192 (132 × 148) · r=14 · accent header strip 20px w/ caps state label · body brown text</dd>
+    <dt>HUD card</dt>          <dd>4,2 → 316,52 (312 × 50) · r=16 · 2 rows of OMC-HUD metrics — row 1 model · context%, row 2 session·tokens · 5h/7d rate limits (openspec change 0002)</dd>
+    <dt>Face box</dt>          <dd>4,58 → 180,236 (176 × 178) · GIF fit-into-box scaler, own dark box (unchanged)</dd>
+    <dt>Bubble card</dt>       <dd>184,60 → 316,192 (132 × 132) · r=14 · accent header strip 20px w/ caps state label · body brown text</dd>
     <dt>Tool chip</dt>         <dd>184,200 → 316,232 (132 × 32) · full pill r=16 · accent dot + uppercase tool name in brown</dd>
     <dt>Text</dt>              <dd>primary <span class="swatch" style="background:#794F27"></span>#794F27 · secondary <span class="swatch" style="background:#9F927D"></span>#9F927D</dd>
     <dt>Accents</dt>           <dd>
