@@ -10,7 +10,7 @@ naming, the sizing pipeline, and the upstream art credits.
 | `clawd`    | [`rullerzhou-afk/clawd-on-desk`](https://github.com/rullerzhou-afk/clawd-on-desk) — pixel-art crab    | Plus2 (default), CoreS3 |
 | `calico`   | same — three-tone cat. **Broken on CoreS3** (green-channel rendering bug, fix pending)                | Plus2      |
 | `bufo`     | upstream `anthropics/claude-desktop-buddy` — frog mascot                                              | Plus2 (legacy) |
-| `cloudling`| [`rullerzhou-afk/clawd-on-desk`](https://github.com/rullerzhou-afk/clawd-on-desk) — cloud sprite      | CoreS3 (default) |
+| `cloudling`| [`rullerzhou-afk/clawd-on-desk`](https://github.com/rullerzhou-afk/clawd-on-desk) — cloud sprite      | CoreS3 (alternative) |
 
 Huge thanks to [@rullerzhou-afk](https://github.com/rullerzhou-afk)
 for the art. If you like any of these, go star their repo — there are

@@ -40,4 +40,4 @@ The daemon's heartbeat JSON has the canonical fields documented in
 - `play`: one-shot sound clip name (lowercase, looked up under
   `/sounds/<name>.wav` on LittleFS)
 - `cmd`: settings dispatch — `vol` / `bright` / `char` / `motion` /
-  `idle_wiggle` (see [stackchan-dashboard.md](#) — TODO).
+  `idle_wiggle` (see the Dashboard section in [`README.md`](../README.md#dashboard)).

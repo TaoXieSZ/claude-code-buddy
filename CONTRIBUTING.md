@@ -1,31 +1,31 @@
 # Contributing
 
-The best contribution is a fork.
+This is an actively maintained fork of
+[`anthropics/claude-desktop-buddy`](https://github.com/anthropics/claude-desktop-buddy).
+The wire protocol is documented in [REFERENCE.md](REFERENCE.md) — that's
+the stable surface other implementors should target.
 
-This repo is a reference implementation — a worked example of one device
-that speaks the BLE protocol described in [REFERENCE.md](REFERENCE.md).
-It's not an actively maintained project, and we'd rather you build the
-thing _you_ want than bend this one into it.
+## What we welcome
 
-## So what should I do instead?
+- Bug fixes for any of the firmware targets (Plus2, StackChan/CoreS3)
+- Bug fixes for the Python daemon bridges (`cc-bridge`, `cursor-bridge`)
+- Corrections to `REFERENCE.md` if the protocol docs are wrong or unclear
+- New character packs or GIF prep pipeline improvements
+- Test coverage additions (`make test` runs both pytest + Unity suites)
 
-**Fork it and make it yours.** Swap the M5Stick for a Pi Pico W. Replace
-the ASCII pets with an e-ink panel. Put it in a 3D-printed shell. Rip
-out everything but `ble_bridge.cpp` and the JSON parser. The protocol is
-the stable surface — `REFERENCE.md` is the contract, this firmware is
-just one way to honor it.
+## What to expect
 
-## What we will take
+Open an issue first for anything non-trivial — a quick description of
+the problem and proposed fix helps avoid duplicate work. PRs without a
+linked issue may take longer to review.
 
-- Corrections to `REFERENCE.md` if the protocol docs are wrong or
-  unclear
-- Fixes for bugs that make the reference _not work as a reference_ —
-  i.e., it doesn't pair, doesn't render, crashes on boot
+CI runs on every PR: Python tests, C++ Unity tests, and the firmware
+build matrix for all five PlatformIO envs. A PR should be green before
+review.
 
-## What we won't take
+## If you want something bigger
 
-- New features, new pets, new screens
-- Ports to other boards (fork!)
-- Refactors, style changes, dependency bumps
-
-If you're unsure which bucket something falls in, it's likely the second one.
+The protocol is the stable surface — `REFERENCE.md` is the contract.
+If you want to port to a different board, swap the display, or
+restructure the daemons, **fork it and make it yours**. We'd rather you
+build the thing you want than try to merge a large divergence here.
