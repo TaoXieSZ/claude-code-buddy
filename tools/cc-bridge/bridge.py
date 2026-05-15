@@ -27,6 +27,7 @@ Run as launchd daemon:
   see tools/cc-bridge/install.sh
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -37,6 +38,7 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from buddy_core import run, BuddyState
+from buddy_core.frame_server import FrameServer
 from dashboard import start_dashboard, DEFAULT_PORT as DASH_DEFAULT_PORT
 
 # ─── config ────────────────────────────────────────────────────────────
@@ -239,11 +241,47 @@ if __name__ == "__main__":
     # don't expose the speaker/screen remote-control to the network.
     DASH_PORT = int(os.environ.get("CC_BRIDGE_DASH_PORT", str(DASH_DEFAULT_PORT)))
 
+    # StackChan camera-stream ingress port. Matches the default in
+    # wifi_secrets.ini consumed by the firmware build. Set to 0 to disable
+    # the listener (e.g. on machines that don't run the StackChan).
+    # P0 of openspec change 0003-stackchan-camera-gestures.
+    FRAME_PORT = int(os.environ.get("CC_BRIDGE_FRAME_PORT", "8770"))
+
     def _on_loop_start(ble, loop, log):
         if DASH_PORT > 0:
             start_dashboard(ble, loop, log=log, port=DASH_PORT)
         else:
             log.info("dashboard disabled (CC_BRIDGE_DASH_PORT=0)")
+
+    async def _frame_server_task(state: BuddyState, dirty):
+        """Listen for StackChan camera frames on FRAME_PORT.
+
+        P0 wiring only: each complete JPEG is logged but not yet consumed.
+        P1 replaces the on_frame callback with the MediaPipe Hands
+        classifier + permission-ack routing. Bound to 0.0.0.0 because the
+        StackChan is on the LAN, not localhost.
+        """
+        import logging
+        log = logging.getLogger("cc-bridge")
+        if FRAME_PORT <= 0:
+            log.info("frame_server disabled (CC_BRIDGE_FRAME_PORT=0)")
+            return
+
+        # P0 placeholder consumer: log size only. P1 swaps this for MediaPipe.
+        def _on_frame(payload: bytes) -> None:
+            log.debug("frame_server: rx %d bytes", len(payload))
+
+        server = FrameServer(host="0.0.0.0", port=FRAME_PORT, on_frame=_on_frame)
+        try:
+            await server.start()
+            log.info("frame_server: listening on 0.0.0.0:%d", FRAME_PORT)
+            await server.serve_forever()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("frame_server: crashed; camera stream dormant")
+        finally:
+            await server.stop()
 
     run(
         name="cc-bridge",
@@ -256,4 +294,5 @@ if __name__ == "__main__":
         keepalive_s=10.0,
         rtc_sync_on_connect=False,  # Claude Desktop handles RTC for cc-bridge
         on_loop_start=_on_loop_start,
+        extra_tasks=[_frame_server_task],
     )

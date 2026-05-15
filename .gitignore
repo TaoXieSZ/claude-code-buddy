@@ -11,3 +11,9 @@ __pycache__/
 # Python packaging
 *.egg-info/
 .venv/
+
+# NOTE: wifi_secrets.ini IS tracked (with placeholder values) so the
+# cores3-stackchan envs always build. Per-dev-machine real credentials are
+# kept out of git via:
+#   git update-index --skip-worktree wifi_secrets.ini
+# Documented in REFERENCE.md.
