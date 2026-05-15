@@ -27,6 +27,7 @@ Run as launchd daemon:
   see tools/cc-bridge/install.sh
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -60,6 +61,13 @@ PTT_MODE = os.environ.get("CC_BRIDGE_PTT_MODE", "tap")
 # pure interactive (AskUserQuestion, *PlanMode) and planning/state-only
 # (TodoWrite, Task*). These don't touch the system, and AskUserQuestion
 # in particular IS the asking mechanism — gating it is a logic loop.
+# Sessions idle for longer than this are dropped by reaper_loop and the
+# total/running counters are recomputed from the surviving set. Safety net
+# against dropped Stop events (which would otherwise leave state.running
+# stuck > 0 forever). 10 min mirrors cursor-bridge's threshold; see
+# openspec change 0004-cc-bridge-session-reaper.
+STALE_SESSION_SEC = 600
+
 SAFE_TOOLS = {
     "AskUserQuestion",
     "ExitPlanMode",
@@ -229,7 +237,65 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             state.model = m
         changed = True
 
+    # Stamp last_seen on the surviving session record for the reaper.
+    # SessionEnd has already popped the record; hud events carry no real
+    # sid (it's "anon" or "?") so they won't match anything in the map.
+    # See openspec change 0004-cc-bridge-session-reaper.
+    if sid in state._sessions:
+        state._sessions[sid]["last_seen"] = time.monotonic()
+
     return changed
+
+
+# ─── stale-session reaper ──────────────────────────────────────────────
+def _reap_stale_sessions(state: BuddyState,
+                         now: float | None = None) -> bool:
+    """Drop sessions whose `last_seen` is older than STALE_SESSION_SEC, then
+    recompute `state.total` / `state.running` from the surviving session map.
+
+    Returns True if anything changed (counters moved or a session was
+    dropped). Pure-sync helper — called from reaper_loop and unit-tested
+    directly without spinning the event loop. `now` defaults to
+    time.monotonic(); tests inject a fixed value.
+
+    Recompute (not decrement) is the part that actually fixes drift —
+    counters can't underflow / overflow because they're rebuilt from the
+    truthful set on every reap.
+    """
+    if now is None:
+        now = time.monotonic()
+    stale = [
+        sid for sid, s in state._sessions.items()
+        if now - s.get("last_seen", now) > STALE_SESSION_SEC
+    ]
+    for sid in stale:
+        state._sessions.pop(sid, None)
+    new_total = len(state._sessions)
+    new_running = sum(1 for s in state._sessions.values() if s.get("running"))
+    changed = bool(stale) or new_total != state.total or new_running != state.running
+    state.total = new_total
+    state.running = new_running
+    return changed
+
+
+async def reaper_loop(state: BuddyState, dirty: asyncio.Event) -> None:
+    """Wake every 60 s, reap stale sessions, signal dirty if anything moved.
+
+    Passed to `run()` via `extra_tasks`. The 60-s cadence is fine even with
+    STALE_SESSION_SEC=600 — at worst the user sees a 60-s delay before the
+    HUD updates after a drift, which is invisible against the 10-min stale
+    window.
+    """
+    import logging
+    log = logging.getLogger("cc-bridge")
+    while True:
+        await asyncio.sleep(60)
+        before = len(state._sessions)
+        if _reap_stale_sessions(state):
+            after = len(state._sessions)
+            log.info("reaper: dropped %d stale session(s); running=%d total=%d",
+                     before - after, state.running, state.total)
+            dirty.set()
 
 
 if __name__ == "__main__":
@@ -256,4 +322,5 @@ if __name__ == "__main__":
         keepalive_s=10.0,
         rtc_sync_on_connect=False,  # Claude Desktop handles RTC for cc-bridge
         on_loop_start=_on_loop_start,
+        extra_tasks=[reaper_loop],
     )

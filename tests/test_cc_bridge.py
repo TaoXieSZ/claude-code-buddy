@@ -186,3 +186,102 @@ def test_hud_event_fires_no_sound_cue(cc, fresh_state):
     cc.apply_event(fresh_state, {"hook_event_name": "hud", "context_pct": 50})
     # `hud` is telemetry — no /sounds/hud.wav blip on every statusline render.
     assert fresh_state.pending_play is None
+
+
+# ─── session staleness + reaper (openspec change 0004) ─────────────────
+
+import time
+import pytest
+
+
+@pytest.mark.parametrize(
+    "name,extra",
+    [
+        ("SessionStart", {}),
+        ("UserPromptSubmit", {}),
+        ("Stop", {}),
+        ("PreToolUse",        {"tool_name": "Bash"}),
+        ("PostToolUse",       {"tool_name": "Bash"}),
+        ("PermissionRequest", {"tool_name": "Bash", "request_id": "r1"}),
+        ("Notification",      {"message": "ping"}),
+    ],
+)
+def test_apply_event_stamps_last_seen_for_session_events(cc, fresh_state, name, extra):
+    """Every per-session event MUST refresh last_seen so the reaper has a
+    single source of truth for whether a session is alive."""
+    if name != "SessionStart":
+        cc.apply_event(fresh_state, ev("SessionStart"))
+        # Backdate so we can prove it gets refreshed by the next event.
+        fresh_state._sessions["s1"]["last_seen"] = time.monotonic() - 999
+
+    before = fresh_state._sessions.get("s1", {}).get("last_seen", 0.0)
+    cc.apply_event(fresh_state, ev(name, **extra))
+    after = fresh_state._sessions.get("s1", {}).get("last_seen")
+    # SessionStart creates the record at the current time; all other events
+    # refresh from the backdated -999.
+    assert after is not None
+    assert after > before
+
+
+def test_hud_event_does_not_stamp_anon_session(cc, fresh_state):
+    """`hud` events use the anon/unknown sid and MUST NOT create or touch
+    a real-looking session record. (apply_event's last_seen stamp guards
+    on `if sid in state._sessions`.)"""
+    cc.apply_event(fresh_state, {"hook_event_name": "hud", "context_pct": 50})
+    assert "anon" not in fresh_state._sessions
+
+
+def test_reaper_drops_stale_session(cc, fresh_state):
+    """A session idle > STALE_SESSION_SEC is removed; counters recompute
+    to zero — this is the exact symptom that previously needed a daemon
+    kickstart."""
+    cc.apply_event(fresh_state, ev("SessionStart"))
+    cc.apply_event(fresh_state, ev("UserPromptSubmit"))
+    assert fresh_state.running == 1
+    # Simulate "Stop never came" by jumping last_seen 1000s into the past.
+    fresh_state._sessions["s1"]["last_seen"] = time.monotonic() - 1000
+    changed = cc._reap_stale_sessions(fresh_state)
+    assert changed is True
+    assert "s1" not in fresh_state._sessions
+    assert fresh_state.running == 0
+    assert fresh_state.total == 0
+
+
+def test_reaper_corrects_drifted_counter(cc, fresh_state):
+    """If state.running ever desyncs from the session map, recompute fixes
+    it on the next reap — even when nothing is stale."""
+    cc.apply_event(fresh_state, ev("SessionStart"))
+    cc.apply_event(fresh_state, ev("UserPromptSubmit"))
+    # Simulate drift: a phantom increment that the session map doesn't back.
+    fresh_state.running = 5
+    changed = cc._reap_stale_sessions(fresh_state)
+    assert changed is True
+    # One real session with running=True → recomputed running=1.
+    assert fresh_state.running == 1
+
+
+def test_reaper_leaves_fresh_sessions_alone(cc, fresh_state):
+    """Don't reap mid-conversation."""
+    cc.apply_event(fresh_state, ev("SessionStart"))
+    cc.apply_event(fresh_state, ev("UserPromptSubmit"))
+    # last_seen is "right now" — well within the stale window.
+    changed = cc._reap_stale_sessions(fresh_state)
+    assert changed is False
+    assert "s1" in fresh_state._sessions
+    assert fresh_state.running == 1
+
+
+def test_reaper_partial_stale_partial_fresh(cc, fresh_state):
+    """Mixed stale + fresh — only stales drop; counters reflect survivors."""
+    cc.apply_event(fresh_state, ev("SessionStart", session_id="s1"))
+    cc.apply_event(fresh_state, ev("UserPromptSubmit", session_id="s1"))
+    cc.apply_event(fresh_state, ev("SessionStart", session_id="s2"))
+    cc.apply_event(fresh_state, ev("UserPromptSubmit", session_id="s2"))
+    assert fresh_state.running == 2 and fresh_state.total == 2
+    fresh_state._sessions["s1"]["last_seen"] = time.monotonic() - 1000
+    changed = cc._reap_stale_sessions(fresh_state)
+    assert changed is True
+    assert "s1" not in fresh_state._sessions
+    assert "s2" in fresh_state._sessions
+    assert fresh_state.running == 1
+    assert fresh_state.total == 1
