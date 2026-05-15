@@ -144,3 +144,115 @@ the firmware always has the current values (they are state, not one-shot events)
 - WHEN `to_payload()` is called
 - THEN the payload includes `context_pct`, `tokens`, `limit_5h`, `limit_7d`, `model`, `session_ms`
 
+### Requirement: Camera frame ingest server
+
+`buddy_core/core.py` MUST run an asyncio TCP server, started from `run()`, that
+accepts a single StackChan camera frame stream. Frames arrive as a 4-byte
+little-endian length header followed by a JPEG payload. The server MUST tolerate
+the StackChan connecting and disconnecting as permission-prompt windows open and
+close.
+
+#### Scenario: StackChan connects and streams
+- GIVEN the daemon `run()` loop is active
+- WHEN the StackChan opens the frame socket and sends a length-prefixed JPEG
+- THEN the server decodes one complete frame and hands it to the gesture
+  classifier
+
+#### Scenario: StackChan disconnects
+- GIVEN an open frame stream
+- WHEN the StackChan closes the socket (its prompt cleared)
+- THEN the server releases the connection and waits for the next one without
+  error
+
+### Requirement: Gesture classification with a hold window
+
+The daemon MUST classify decoded frames into `thumbs-up` / `thumbs-down` / `none`
+via MediaPipe Hands, and MUST require the same non-`none` gesture across a
+debounce/hold window before it counts as confirmed. MediaPipe MUST be an optional
+import — if unavailable, frames are dropped and gesture-approve degrades to
+manual approval without crashing.
+
+#### Scenario: Sustained gesture confirmed
+- GIVEN a pending permission prompt and a frame stream
+- WHEN the same `thumbs-up` is detected across the full hold window
+- THEN the gesture is confirmed as `approve`
+
+#### Scenario: Flickering gesture not confirmed
+- GIVEN a frame stream
+- WHEN a `thumbs-up` appears for fewer frames than the hold window
+- THEN no decision is confirmed
+
+#### Scenario: MediaPipe unavailable
+- GIVEN a daemon where the MediaPipe import failed
+- WHEN frames arrive
+- THEN they are logged and dropped; no crash; the permission prompt remains
+  resolvable manually
+
+### Requirement: Confirmed gesture resolves the pending permission
+
+When a gesture is confirmed while `state.prompt` is set, the daemon MUST send
+`{"cmd":"gesture","result":"approve"|"deny"}` back to the firmware for UI
+feedback, and MUST route the decision into the same Claude Code permission
+resolution path that a manual approval uses. A confirmed gesture for a tool in
+`SAFE_TOOLS` is a no-op (those never block).
+
+#### Scenario: Confirmed approve resolves the prompt
+- GIVEN a `BuddyState` with `state.prompt` set for a non-`SAFE_TOOLS` tool
+- WHEN a gesture is confirmed as `approve`
+- THEN the daemon sends `{"cmd":"gesture","result":"approve"}` to the firmware
+  and the pending Claude Code permission is approved
+
+#### Scenario: Confirmed deny resolves the prompt
+- GIVEN a `BuddyState` with `state.prompt` set
+- WHEN a gesture is confirmed as `deny`
+- THEN the daemon sends `{"cmd":"gesture","result":"deny"}` to the firmware and
+  the pending Claude Code permission is denied
+
+#### Scenario: Gesture confirmed with no pending prompt
+- GIVEN a `BuddyState` with `state.prompt` unset
+- WHEN a gesture is confirmed
+- THEN no permission decision is made and no gesture command is sent
+
+### Requirement: Session staleness tracking
+
+cc-bridge's `apply_event` MUST stamp `state._sessions[sid]["last_seen"]` with
+`time.monotonic()` on every branch that creates or accesses a session's
+record. This is the single source of truth the reaper uses to decide
+whether a session is alive.
+
+#### Scenario: SessionStart stamps last_seen
+- GIVEN a fresh `BuddyState`
+- WHEN a `SessionStart` event arrives for a new sid
+- THEN `state._sessions[sid]["last_seen"]` is set to roughly the current monotonic time
+
+#### Scenario: Every per-session event stamps last_seen
+- GIVEN a `BuddyState` with one tracked session
+- WHEN any of `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`,
+  `PermissionRequest`, `Notification` arrives for that sid
+- THEN `state._sessions[sid]["last_seen"]` is refreshed to roughly the
+  current monotonic time
+
+### Requirement: Stale-session reaper
+
+cc-bridge MUST run a background reaper that drops sessions idle for longer
+than `STALE_SESSION_SEC` (default 600 s) and recomputes `state.total` and
+`state.running` from the surviving session map. The reaper protects against
+unbounded counter drift when `Stop` events are dropped upstream.
+
+#### Scenario: Stale session is removed
+- GIVEN `state._sessions = {"s1": {"running": True, "last_seen": t-999}}`
+  and `state.running == 1`
+- WHEN the reaper runs with `STALE_SESSION_SEC = 600`
+- THEN `"s1"` is removed from `state._sessions` and `state.running` is recomputed to 0
+
+#### Scenario: Counter drift corrected by recompute
+- GIVEN `state.running == 5` but `state._sessions` actually contains only
+  two records both with `running: True`
+- WHEN the reaper runs and none of them are stale
+- THEN `state.running` is recomputed to 2 (the truthful count)
+
+#### Scenario: Non-stale sessions are left alone
+- GIVEN `state._sessions` contains a session with `last_seen = monotonic() - 10`
+- WHEN the reaper runs with `STALE_SESSION_SEC = 600`
+- THEN that session is unchanged
+
