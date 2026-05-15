@@ -386,20 +386,12 @@ if __name__ == "__main__":
 
         loop.create_task(_run())
 
-    def _classify_jpeg(payload: bytes) -> str | None:
-        """Decode one JPEG → MediaPipe Hands → "approve" / "deny" / None.
-
-        Returns None for any frame where MediaPipe doesn't detect a clear
-        thumbs-up or thumbs-down. Real implementation lives in the
-        cc-bridge runtime; this stub keeps daemon startup unblocked and
-        the on-device gate check exercisable end-to-end after the
-        mediapipe + opencv-python deps are added. Returning None until
-        then degrades gesture-approve to manual — no other path breaks.
-        """
-        # P1 follow-up: decode JPEG → np.uint8 array → mediapipe.solutions
-        # .hands.Hands(...).process(rgb).multi_hand_landmarks → thumb-up/down
-        # via simple landmark-y comparisons (thumb tip vs index MCP).
-        return None
+    # Real classifier — decode JPEG → MediaPipe Hands → "approve" / "deny" /
+    # None. Lives in buddy_core.hand_gesture so the pure-logic landmark
+    # heuristic is host-testable without mediapipe. If mediapipe + pillow
+    # aren't installed in the venv, classify_jpeg returns None and logs
+    # once — gesture-approve goes dormant, manual approval still works.
+    from buddy_core.hand_gesture import classify_jpeg as _classify_jpeg
 
     run(
         name="cc-bridge",
