@@ -15,6 +15,19 @@ dependencies = [
 dev = [
     "pytest>=7",
 ]
+# Optional gesture-recognition stack for the StackChan camera path.
+# Heavy — mediapipe alone is ~50MB. Not pulled by default so cc-bridge
+# stays light for users without a StackChan or who don't want gestures.
+# Install into the daemon venv:
+#   ~/.cc-bridge/venv/bin/pip install -e ".[vision]"
+# Then restart cc-bridge. If unavailable, gesture-approve degrades to
+# manual approval — nothing breaks. See openspec change
+# 2026-05-15-0003-stackchan-camera-gestures.
+vision = [
+    "mediapipe>=0.10",
+    "pillow>=10",
+    "numpy>=1.24",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
