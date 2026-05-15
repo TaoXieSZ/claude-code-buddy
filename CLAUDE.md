@@ -9,12 +9,18 @@ Fork of `anthropics/claude-desktop-buddy` maintained at
 
 ```
 src/
-  main.cpp              # 1500+ LOC, holds button FSM, HUD draw, state machine
+  main.cpp              # Plus2 firmware: 1500+ LOC, button FSM, HUD, state machine
   data.h                # JSON heartbeat parse (lineGen lives here)
   character.cpp         # GIF playback, peek mode
   bugc2.cpp             # BugC2 chassis I2C detection + motor control
   audio_capture.cpp     # PDM mic infra — dormant, GPIO 0 conflicts with BugC2 SDA
   audio_ble.cpp         # ADPCM frame stream — dormant
+  stackchan/            # CoreS3 firmware — separate target, own main()
+    main.cpp            # BLE NUS peripheral + lock-free RX ring
+    character_chan.cpp  # bilinear GIF render + ACNH-style status panel
+    sound.cpp           # preload /sounds/*.wav, M5.Speaker.playWav
+    motion.cpp          # servo dance patterns via StackChan-BSP
+    settings.cpp        # NVS-backed runtime settings (dashboard target)
 tools/
   buddy_core/core.py    # ~340 LOC shared module: BleWriter, BuddyState,
                         # make_on_stick_line (permission+mic dispatch),
@@ -26,13 +32,23 @@ tools/
                         # 2s keepalive + RTC sync on connect
 ```
 
-PlatformIO envs (only differ by `BUDDY_BRAND_PREFIX`/`BUDDY_BRAND_NAME`):
-`m5stickc-plus2-claude`, `m5stickc-plus2-cursor`, `m5stickc-plus2`,
-`m5stickc-plus`, `audio_selftest`. All compile from same `src/`.
+PlatformIO envs — two firmware targets:
+- **Plus2/Plus** (compile from `src/*.cpp`): `m5stickc-plus2`,
+  `m5stickc-plus2-claude`, `m5stickc-plus2-cursor`, `m5stickc-plus`.
+  The `-claude`/`-cursor` variants only differ by `BUDDY_BRAND_PREFIX` /
+  `BUDDY_BRAND_NAME` build flags.
+- **CoreS3/StackChan** (compile from `src/stackchan/*.cpp`):
+  `cores3-stackchan`, `cores3-stackchan-claude`, `cores3-stackchan-cursor`.
+- `audio_selftest` (PDM mic bringup, dormant) and `native` (host-side
+  Unity test runner) are non-device envs.
 
 ## Hardware
 
 - **M5StickC Plus2** + **BugC2** chassis. Plus1 also supported by legacy env.
+- **M5Stack StackChan (CoreS3)** — desktop-pet target: 2.0" LCD, two
+  feedback servos, 12 RGB LEDs, 1W speaker. Speaks hook events via
+  preloaded WAVs, dances on state changes, tuned from a localhost
+  dashboard. Same wire protocol as the stick.
 - Plus2 PDM mic: `pin_data_in=GPIO_NUM_34`, `pin_ws=GPIO_NUM_0` (M5Unified
   source confirmed). BugC2 I²C: `SDA=GPIO_NUM_0`, `SCL=GPIO_NUM_26`.
   **GPIO 0 collision is unavoidable** — can't have both BugC2 and stick
