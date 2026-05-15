@@ -703,7 +703,16 @@ def run(
         # client connecting at t=0 sees a functioning ble writer.
         if on_loop_start:
             try:
-                on_loop_start(ble, loop, log)
+                # Backward compat: older callbacks take (ble, loop, log).
+                # The 4-arg form adds `state` so frame-ingest / dashboard
+                # consumers can read live BuddyState. See openspec change
+                # 0003-stackchan-camera-gestures.
+                import inspect
+                sig = inspect.signature(on_loop_start)
+                if len(sig.parameters) >= 4:
+                    on_loop_start(ble, loop, log, state)
+                else:
+                    on_loop_start(ble, loop, log)
             except Exception as e:
                 log.warning("on_loop_start failed (non-fatal): %s", e)
 

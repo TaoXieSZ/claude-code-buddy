@@ -126,3 +126,10 @@ void wifiStreamStop() {
 bool wifiStreamIsConnected() {
     return s_connected && s_client.connected();
 }
+
+bool wifiStreamCredsAvailable() {
+    // Inverse of the internal placeholdersUnset() guard — exposed so
+    // main.cpp's arm-decider can short-circuit the cameraStart/Stop bounce
+    // when wifi_secrets.ini hasn't been edited from its tracked default.
+    return !placeholdersUnset();
+}

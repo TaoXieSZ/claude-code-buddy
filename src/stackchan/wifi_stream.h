@@ -39,3 +39,9 @@ void wifiStreamStop();
 // True between a successful wifiStreamStart() and the next wifiStreamStop()
 // or a detected socket error.
 bool wifiStreamIsConnected();
+
+// True iff wifi_secrets.ini has been edited from its tracked placeholder.
+// main.cpp's loop() checks this before arming the camera — skips the
+// cameraStart/Stop bounce (and the brief speaker mute) when there's no
+// way the stream could succeed anyway.
+bool wifiStreamCredsAvailable();

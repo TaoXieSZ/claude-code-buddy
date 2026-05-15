@@ -35,6 +35,10 @@
 #include "sound.h"
 #include "motion.h"
 #include "settings.h"
+#include "camera_chan.h"
+#include "wifi_stream.h"
+#include "camera_arm.h"
+#include "permission_ack.h"
 
 // 2026-05-13: m5avatar dropped in favor of the Plus2 Clawd/Calico GIFs —
 // user wants visual continuity with the stick UX, and character_chan.cpp
@@ -80,6 +84,19 @@ static volatile size_t    g_rx_tail = 0;   // read by app task
 static uint8_t  g_cur_state   = CHAR_SLEEP;
 static uint32_t g_last_rx_ms  = 0;
 static uint32_t g_celebrate_until = 0;  // brief "done" celebrate timeout
+
+// ---- Camera-gesture state (openspec 0003) ---------------------------------
+// Latched prompt id, updated each heartbeat. Required to emit a permission
+// ack with the right rid after a confirmed gesture. Cleared when the daemon
+// reports no pending prompt. 40 bytes covers Claude Code's
+// "req_<unix_ms>" rid shape with margin.
+static char     g_prompt_id[40] = "";
+// Last camera-arm state seen by loop() — used by cameraTransition() to fire
+// cameraStart/Stop exactly once on the rising/falling edge.
+static bool     g_arm_state     = false;
+// Throttle for the capture+send loop. ~100ms = ~10 fps, matches the P0
+// gate-check target.
+static uint32_t g_last_frame_ms = 0;
 
 // Map the daemon's status payload to a CharState. Priority:
 //   permission-pending  → ATTENTION
@@ -159,6 +176,50 @@ static void applyJsonLine(const char* line) {
       settingsSetTilt((uint8_t)(int)(doc["v"] | 65));
       return;
     }
+    // Daemon-confirmed gesture (openspec 0003): show ATTENTION-state UI
+    // feedback that the gesture registered, then emit the matching
+    // {"cmd":"permission","id","decision"} on debug-TX so on_stick_line
+    // resolves the pending Claude Code future. "approve" → wire decision
+    // "once" (matching the Plus2 A-button convention); "deny" → "deny".
+    if (strcmp(cmd, "gesture") == 0) {
+      const char* result = doc["result"] | "";
+      if (!*result || g_prompt_id[0] == 0) return;
+      const char* wire_dec = nullptr;
+      if (strcmp(result, "approve") == 0) wire_dec = "once";
+      else if (strcmp(result, "deny") == 0) wire_dec = "deny";
+      if (!wire_dec) return;
+
+      // Visible "I saw your gesture" cue — re-assert ATTENTION so the
+      // character does the look-up beat again. Cheap, no new asset.
+      characterSetState(CHAR_ATTENTION);
+
+      // Emit the ack on debug-TX. If TX isn't subscribed (daemon
+      // disconnected mid-gesture) the daemon will time out the
+      // wait_permission future and Claude Code falls back to ask.
+      char ack[128];
+      size_t n = buildPermissionAck(g_prompt_id, wire_dec, ack, sizeof(ack));
+      if (n > 0 && g_connected && g_dbg_tx) {
+        g_dbg_tx->setValue((uint8_t*)ack, n);
+        g_dbg_tx->notify();
+        Serial.printf("[gesture] %s → permission %s id=%s\n",
+                      result, wire_dec, g_prompt_id);
+      }
+      return;
+    }
+  }
+
+  // Latch the pending-prompt id from the heartbeat so a later gesture can
+  // emit the right rid in its permission ack. Cleared when the daemon drops
+  // the prompt object. This lives outside the state-machine flow so it
+  // updates even when the visual state doesn't change.
+  if (!doc["prompt"].isNull()) {
+    const char* pid = doc["prompt"]["id"] | "";
+    if (*pid) {
+      strncpy(g_prompt_id, pid, sizeof(g_prompt_id) - 1);
+      g_prompt_id[sizeof(g_prompt_id) - 1] = 0;
+    }
+  } else {
+    g_prompt_id[0] = 0;
   }
 
   bool is_done = false;
@@ -387,6 +448,44 @@ void loop() {
   motionTick();
 
   uint32_t now = millis();
+
+  // ── camera/wifi-stream lifecycle (openspec 0003) ─────────────────────
+  // Bound to (ATTENTION && have_prompt_id). On the rising edge we bring
+  // up GC0308 + the daemon socket; on the falling edge we tear them down
+  // so sound.cpp regains the I2C bus. While armed, send a frame every
+  // ~100ms (≥10 fps QVGA — the P0 gate-check target).
+  bool now_armed = shouldCameraBeArmed(
+      g_cur_state == CHAR_ATTENTION,
+      g_prompt_id[0] != 0,
+      wifiStreamCredsAvailable());
+  ArmTransition trans = cameraTransition(g_arm_state, now_armed);
+  if (trans == ArmTransition::Arm) {
+    Serial.println("[cam] arm: cameraStart + wifiStreamStart");
+    if (cameraStart()) {
+      if (!wifiStreamStart()) {
+        // WiFi/daemon unreachable — drop the camera too so we don't
+        // hold the I2C bus needlessly. Manual approval still works.
+        cameraStop();
+      }
+    }
+  } else if (trans == ArmTransition::Disarm) {
+    Serial.println("[cam] disarm: wifiStreamStop + cameraStop");
+    wifiStreamStop();
+    cameraStop();
+    g_last_frame_ms = 0;
+  }
+  g_arm_state = now_armed;
+
+  if (now_armed && cameraIsActive() && wifiStreamIsConnected() &&
+      (now - g_last_frame_ms) >= 100) {
+    g_last_frame_ms = now;
+    uint8_t* jpg = nullptr;
+    size_t   len = 0;
+    if (cameraCaptureJpeg(&jpg, &len)) {
+      wifiStreamSendFrame(jpg, len);  // best-effort; socket dies → retry next prompt
+      free(jpg);                      // frame2jpg buffer is ours to free
+    }
+  }
 
   // Held-celebrate → fall back to IDLE (or BUSY if still running) once the
   // dwell expires. Re-evaluating from g_last_rx_ms keeps idle detection
