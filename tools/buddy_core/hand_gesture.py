@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 from typing import List, Optional, Sequence, Tuple, Union
 
 _log = logging.getLogger(__name__)
@@ -73,49 +74,90 @@ def classify_landmarks(landmarks: Optional[Sequence[Landmark]]) -> Optional[str]
 
 # ─── JPEG → landmarks (optional heavy deps) ───────────────────────────
 
-# Cached on first use so we pay the import / model-load cost once.
-_hands_solution = None
-_hands_unavailable_reason: Optional[str] = None
+# MediaPipe Tasks API model file. The legacy `mediapipe.solutions.hands`
+# module was dropped in mediapipe>=0.10 builds for newer Pythons; the
+# Tasks API (HandLandmarker) is the supported successor. It needs a
+# `.task` model file at runtime — we cache it on first use and never
+# re-download.
+_HAND_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+)
 
 
-def _get_hands_solution():
-    """Lazy singleton for `mediapipe.solutions.hands.Hands`. Returns None
-    if mediapipe or pillow isn't installed; logs the reason once."""
-    global _hands_solution, _hands_unavailable_reason
-    if _hands_solution is not None:
-        return _hands_solution
-    if _hands_unavailable_reason is not None:
+def _model_cache_path() -> str:
+    """`~/.cache/cc-bridge/hand_landmarker.task` (XDG-ish)."""
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    cache_dir = os.path.join(base, "cc-bridge")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, "hand_landmarker.task")
+
+
+def _ensure_model() -> Optional[str]:
+    """Download the HandLandmarker model if it isn't cached yet. Returns
+    the local path on success, None on any failure."""
+    path = _model_cache_path()
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    try:
+        import urllib.request
+        _log.info("Downloading hand_landmarker.task from %s", _HAND_MODEL_URL)
+        urllib.request.urlretrieve(_HAND_MODEL_URL, path)
+        _log.info("Cached model at %s (%d bytes)", path, os.path.getsize(path))
+        return path
+    except Exception as e:  # noqa: BLE001
+        _log.warning("hand_landmarker.task download failed: %s", e)
+        return None
+
+
+# Cached on first use so we pay the model-load cost once.
+_landmarker = None
+_landmarker_unavailable_reason: Optional[str] = None
+
+
+def _get_landmarker():
+    """Lazy singleton for `mp.tasks.vision.HandLandmarker`. Returns None
+    if mediapipe / pillow / numpy isn't installed OR the model file can't
+    be downloaded. The first call also pulls the model (~8 MB)."""
+    global _landmarker, _landmarker_unavailable_reason
+    if _landmarker is not None:
+        return _landmarker
+    if _landmarker_unavailable_reason is not None:
         return None
     try:
         import mediapipe as mp  # noqa: F401
+        from PIL import Image  # noqa: F401
+        import numpy as np  # noqa: F401
     except Exception as e:  # noqa: BLE001
-        _hands_unavailable_reason = f"mediapipe import failed: {e}"
-        _log.warning(_hands_unavailable_reason)
+        _landmarker_unavailable_reason = f"vision deps missing: {e}"
+        _log.warning(_landmarker_unavailable_reason)
+        return None
+    model_path = _ensure_model()
+    if not model_path:
+        _landmarker_unavailable_reason = "model file unavailable"
         return None
     try:
-        import PIL  # noqa: F401
-    except Exception as e:  # noqa: BLE001
-        _hands_unavailable_reason = f"pillow import failed: {e}"
-        _log.warning(_hands_unavailable_reason)
-        return None
-    try:
-        import mediapipe as mp
-        _hands_solution = mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            min_detection_confidence=0.6,
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision as mp_vision
+        options = mp_vision.HandLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=model_path),
+            running_mode=mp_vision.RunningMode.IMAGE,  # one-shot per JPEG
+            num_hands=1,
+            min_hand_detection_confidence=0.6,
+            min_hand_presence_confidence=0.5,
             min_tracking_confidence=0.5,
         )
-        _log.info("mediapipe Hands initialised")
+        _landmarker = mp_vision.HandLandmarker.create_from_options(options)
+        _log.info("mediapipe HandLandmarker initialised")
     except Exception as e:  # noqa: BLE001
-        _hands_unavailable_reason = f"Hands init failed: {e}"
-        _log.warning(_hands_unavailable_reason)
+        _landmarker_unavailable_reason = f"HandLandmarker init failed: {e}"
+        _log.warning(_landmarker_unavailable_reason)
         return None
-    return _hands_solution
+    return _landmarker
 
 
 def classify_jpeg(payload: bytes) -> Optional[str]:
-    """Decode `payload` (JPEG bytes) → MediaPipe Hands → classify.
+    """Decode `payload` (JPEG bytes) → MediaPipe HandLandmarker → classify.
 
     Returns 'approve' / 'deny' / None. None on any failure (no hand detected,
     mediapipe missing, decode error). Errors are swallowed — never let a
@@ -123,19 +165,22 @@ def classify_jpeg(payload: bytes) -> Optional[str]:
     """
     if not payload:
         return None
-    hands = _get_hands_solution()
-    if hands is None:
+    landmarker = _get_landmarker()
+    if landmarker is None:
         return None
     try:
+        import mediapipe as mp
         from PIL import Image
         import numpy as np
         img = Image.open(io.BytesIO(payload)).convert("RGB")
         rgb = np.asarray(img, dtype=np.uint8)
-        result = hands.process(rgb)
-        if not result.multi_hand_landmarks:
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = landmarker.detect(mp_image)
+        if not result.hand_landmarks:
             return None
-        lm = result.multi_hand_landmarks[0].landmark
-        # Convert MediaPipe NormalizedLandmark objects to plain tuples.
+        # result.hand_landmarks is a list (one entry per detected hand) of
+        # lists of NormalizedLandmark objects. We requested num_hands=1.
+        lm = result.hand_landmarks[0]
         pts: List[Tuple[float, float, float]] = [(p.x, p.y, p.z) for p in lm]
         return classify_landmarks(pts)
     except Exception:  # noqa: BLE001
