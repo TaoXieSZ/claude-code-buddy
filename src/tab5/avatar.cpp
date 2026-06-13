@@ -159,12 +159,22 @@ bool avatarTick() {
   return true;
 }
 
-void avatarDraw(M5Canvas& dst, int cx, int cy) {
+void avatarDraw(M5Canvas& dst, int cx, int cy, int outSize) {
   if (!g_ready || !g_open) return;
-  g_cv.pushSprite(&dst, cx - BOX / 2, cy - BOX / 2);
+  if (outSize <= 0 || outSize == BOX) {
+    g_cv.pushSprite(&dst, cx - BOX / 2, cy - BOX / 2);
+  } else {
+    float z = (float)outSize / BOX;
+    g_cv.pushRotateZoom(&dst, cx, cy, 0.0f, z, z);
+  }
 }
 
-void avatarPushDirect(int cx, int cy) {
+void avatarPushDirect(int cx, int cy, int outSize) {
   if (!g_ready || !g_open) return;
-  g_cv.pushSprite(&M5.Display, cx - BOX / 2, cy - BOX / 2);
+  if (outSize <= 0 || outSize == BOX) {
+    g_cv.pushSprite(&M5.Display, cx - BOX / 2, cy - BOX / 2);
+  } else {
+    float z = (float)outSize / BOX;
+    g_cv.pushRotateZoom(&M5.Display, cx, cy, 0.0f, z, z);
+  }
 }

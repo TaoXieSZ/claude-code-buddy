@@ -538,4 +538,5 @@ if __name__ == "__main__":
         extra_tasks=[reaper_loop],
         route_stager=_route_stager,
         serial_port=TAB5_SERIAL or None,
+        app="claude",
     )

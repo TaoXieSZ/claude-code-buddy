@@ -151,6 +151,68 @@ events to trigger dictation apps. `down` = key press, `up` = key release.
 Use case: a stick-mounted gesture (e.g., tap-then-hold button) that toggles
 PTT recording in Typeless or similar. See the README for gesture details.
 
+### Mic audio frames (optional, device-as-wireless-mic)
+
+A device with a microphone can also stream live audio while PTT is held, so the
+daemon plays it into a virtual audio device (e.g. BlackHole) that a dictation
+app uses as its input. Frames are 16 kHz mono S16LE PCM, base64-encoded, one
+chunk per line, prefixed `A`:
+
+```
+A<base64 of raw S16LE mono PCM>
+```
+
+Stream between `mic down` and `mic up`. The daemon decodes and plays the PCM
+into the configured sink (`TAB5_MIC_SINK`, default `BlackHole`) via PortAudio;
+the pipe closes shortly after the frames stop. Requires the daemon venv to have
+`sounddevice` (PortAudio) and the sink device to exist.
+
+## Keyboard relay (device as a Mac second keyboard)
+
+A device with a physical keyboard (e.g. the Tab5 keyboard accessory / USB-A
+host) can relay keystrokes to the Mac. The daemon types them via the OS event
+API (macOS Quartz). Two forms:
+
+```json
+{"cmd":"key","ch":"a"}                       // printable: type the Unicode char
+{"cmd":"key","key":"enter"}                  // named special key
+{"cmd":"key","key":"c","mods":["cmd"]}       // shortcut: keycode + modifiers
+```
+
+- `ch`: a single Unicode character, typed verbatim (layout-independent). Send
+  this for normal printable input; bake Shift into the character (e.g. `"A"`,
+  `"!"`). Escape `"` and `\` per JSON.
+- `key`: a named key for non-printables and shortcuts —
+  `enter`/`return`, `backspace`/`delete`, `tab`, `esc`, `space`, `left`,
+  `right`, `up`, `down`, `fwddelete`, or a single letter/digit (for shortcuts
+  like `⌘C`). Mapped to a keycode by the daemon.
+- `mods`: optional array of `"cmd"`, `"opt"`, `"ctrl"`, `"shift"` applied as
+  modifier flags. Use `key` (not `ch`) when any of cmd/opt/ctrl is held so the
+  OS sees a real shortcut.
+
+Requires the daemon's process to have macOS Accessibility permission (same as
+the mic PTT relay). If unavailable, the daemon logs a warning and drops the key.
+
+## Screenshot (dev tool)
+
+A device that composites its frame into a readable buffer can stream it back on
+request, so a tool/agent can *see* the screen without a camera. On `{"cmd":"shot"}`
+the device emits a framed, downsampled RGB565 screenshot:
+
+```
+SHOT 640 360 460800        // SHOT <width> <height> <rawByteLen>
+<base64 chunk line>        // base64 of the raw little-endian RGB565 buffer
+... repeated ...
+ENDSHOT
+```
+
+The host daemon recognizes the `SHOT`…`ENDSHOT` frame in its serial RX (these
+lines are not heartbeats), base64-decodes, expands RGB565→RGB888, and writes a
+PNG (default `/tmp/tab5-shot.png`). Trigger it through the daemon socket with
+`{"action":"screenshot"}` (the daemon replies `{"ok":true,"path":"…"}`), e.g.
+via `tools/tab5-shot/shot.py`. Emit the whole frame contiguously so a heartbeat
+never interleaves it.
+
 ## One-shot on connect
 
 Time sync (epoch seconds + timezone offset in seconds):

@@ -62,7 +62,7 @@ static void tab5kbdPoll() {
     if (!kbRead(0x30, ev, 2)) return;
     if (ev[1] != 0xFF && ev[1] != 0x00) {
       Serial.printf("[kbd] key mod=%02x code=%02x\n", ev[0], ev[1]);
-      uiKeyEvent(ev[1], ev[0]);
+      feedSendKey(ev[1], ev[0]);   // relay to the Mac (dashboard is touch-driven)
     }
   }
 }
@@ -207,6 +207,6 @@ void kbdPoll() {
   while (s_qTail != s_qHead) {
     uint8_t k = s_qKey[s_qTail], m = s_qMod[s_qTail];
     s_qTail = (s_qTail + 1) & 7;
-    uiKeyEvent(k, m);
+    feedSendKey(k, m);   // relay to the Mac (dashboard is touch-driven)
   }
 }

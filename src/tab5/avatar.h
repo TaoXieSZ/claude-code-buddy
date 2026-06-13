@@ -8,6 +8,6 @@
 bool avatarInit(uint16_t bgColor);              // mount FS, alloc canvas
 void avatarSetState(uint8_t uiState);           // switch GIF on state change
 bool avatarTick();                              // decode next frame; true if advanced
-void avatarDraw(M5Canvas& dst, int cx, int cy); // blit canvas centered at cx,cy
-void avatarPushDirect(int cx, int cy);          // fast partial blit straight to LCD
+void avatarDraw(M5Canvas& dst, int cx, int cy, int outSize = 0); // blit centered; outSize=0 → native
+void avatarPushDirect(int cx, int cy, int outSize = 0);          // fast blit straight to LCD
 bool avatarReady();                             // false → caller draws fallback

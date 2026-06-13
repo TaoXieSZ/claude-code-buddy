@@ -1,6 +1,8 @@
 """Tests for tools/buddy_core/core.py — the shared daemon library."""
 
 import asyncio
+import struct
+import zlib
 
 
 # ─── BuddyState.to_payload ─────────────────────────────────────────────
@@ -17,6 +19,15 @@ def test_to_payload_basic_fields(fresh_state):
     assert p["waiting"] == 0
     assert p["msg"] == "thinking…"
     assert p["tokens"] == 1234
+
+
+def test_to_payload_app_tag(fresh_state):
+    # No tag by default → field omitted (back-compatible single-feed firmware).
+    assert "app" not in fresh_state.to_payload()
+    # Set → emitted on every heartbeat for dual-feed routing.
+    fresh_state.app = "cursor"
+    assert fresh_state.to_payload()["app"] == "cursor"
+    assert fresh_state.to_payload()["app"] == "cursor"
 
 
 def test_to_payload_prompt_omitted_when_none(fresh_state):
@@ -102,6 +113,70 @@ def test_mod_flags_cover_modifier_keycodes(core):
     assert 57 not in core._MOD_FLAGS
     # Right Option (61, the PTT default) is kCGEventFlagMaskAlternate.
     assert core._MOD_FLAGS[61] == 0x080000
+
+
+# ─── keyboard relay: name → kVK (cmd:key) ──────────────────────────────
+
+def test_kvk_for_special_keys(core):
+    assert core.kvk_for("enter") == 0x24
+    assert core.kvk_for("return") == 0x24
+    assert core.kvk_for("backspace") == 0x33
+    assert core.kvk_for("tab") == 0x30
+    assert core.kvk_for("esc") == 0x35
+    assert core.kvk_for("left") == 0x7B
+    assert core.kvk_for("up") == 0x7E
+
+
+def test_kvk_for_letters_and_digits(core):
+    assert core.kvk_for("a") == 0x00
+    assert core.kvk_for("c") == 0x08   # ⌘C lands on the real C keycode
+    assert core.kvk_for("z") == 0x06
+    assert core.kvk_for("1") == 0x12
+    assert core.kvk_for("0") == 0x1D
+
+
+def test_kvk_for_is_case_insensitive_and_unknown_is_none(core):
+    assert core.kvk_for("UP") == 0x7E
+    assert core.kvk_for("ENTER") == 0x24
+    assert core.kvk_for("nope") is None
+    assert core.kvk_for("") is None
+
+
+def test_mod_mask_covers_relay_modifiers(core):
+    assert core._MOD_MASK["cmd"] == 0x100000
+    assert core._MOD_MASK["shift"] == 0x020000
+    assert core._MOD_MASK["opt"] == 0x080000
+    assert core._MOD_MASK["ctrl"] == 0x040000
+
+
+# ─── screenshot PNG writer ─────────────────────────────────────────────
+
+def test_rgb565_to_rgb888_pure_colors(core):
+    # red 0xF800, green 0x07E0, blue 0x001F (little-endian byte pairs)
+    raw = bytes([0x00, 0xF8, 0xE0, 0x07, 0x1F, 0x00])
+    rgb = core._rgb565_to_rgb888(raw, 3, 1)
+    assert rgb[0:3] == bytes([0xFF, 0x00, 0x00])   # red
+    assert rgb[3:6] == bytes([0x00, 0xFF, 0x00])   # green
+    assert rgb[6:9] == bytes([0x00, 0x00, 0xFF])   # blue
+
+
+def test_write_png_is_valid(core, tmp_path):
+    w, h = 4, 3
+    rgb = bytes([10, 20, 30]) * (w * h)
+    out = tmp_path / "shot.png"
+    core._write_png(str(out), w, h, rgb)
+    data = out.read_bytes()
+    # PNG signature
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    # first chunk is IHDR with our dimensions
+    assert data[12:16] == b"IHDR"
+    iw, ih = struct.unpack(">II", data[16:24])
+    assert (iw, ih) == (w, h)
+    # IDAT decompresses to h rows of (1 filter byte + w*3)
+    idat_start = data.find(b"IDAT") + 4
+    idat_len = struct.unpack(">I", data[idat_start - 8:idat_start - 4])[0]
+    raw = zlib.decompress(data[idat_start:idat_start + idat_len])
+    assert len(raw) == h * (1 + w * 3)
 
 
 # ─── BleWriter.write fast-skip ─────────────────────────────────────────

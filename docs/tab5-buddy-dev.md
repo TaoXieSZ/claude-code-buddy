@@ -18,7 +18,11 @@ phased plan: `docs/proposals/tab5-buddy.md`.
 | Hook coverage (compaction/subagents/tool failures, openspec 0005) | ✅ archived |
 | Sound cues (33 WAVs over shared I2S) | ✅ 2026-06-11 |
 | **M2 permission round-trip** | **🟡 allow path verified end-to-end 2026-06-12; deny untested on-device; post-timeout tap gap open (below)** |
-| M3 cursor-bridge second feed | ⬜ |
+| M3 dual live feed (Claude + Cursor) | ✅ 2026-06-13 — `app` tag routing (openspec `tab5-dashboard-ui` is the on-device side; daemon sends `app:"claude"/"cursor"`) |
+| Claude-code UI redesign (role rails, mono lane, tab icons, Agent Buddy) | ✅ 2026-06-13 (openspec `tab5-dashboard-ui`) |
+| Screenshot tool (agent self-verify, no camera) | ✅ 2026-06-13 (openspec `tab5-screenshot`) |
+| Keyboard relay → Mac second keyboard (`cmd:key`) | ✅ 2026-06-13 (openspec `tab5-keyboard-relay`) |
+| PTT dictation (`cmd:mic`) + mic audio → BlackHole | ✅ 2026-06-13 user-verified (openspec `tab5-ptt-dictation`, `tab5-mic-audio`) |
 | Productize deployment (merge → launchd) | ⬜ blocked on branch merge (below) |
 
 ## Branch topology (read this first)
@@ -122,6 +126,26 @@ symlink). Flashing requires stopping whoever holds the port first.
 Permanent fix = merge to main + add `CC_BRIDGE_TAB5_SERIAL` to
 `~/Library/LaunchAgents/com.cc-bridge.plist` + `launchctl load`.
 
+**Which daemon actually owns the Tab5 (2026-06-13).** In practice the Tab5
+serial is held by **cursor-bridge**, running from the
+`claude-desktop-buddy-cursor` checkout (`feat/cursor-next`), via the launchd
+agent `com.cursor-bridge`. Its config is persisted in
+`~/Library/LaunchAgents/com.cursor-bridge.plist` → `EnvironmentVariables`:
+
+```
+CURSOR_BRIDGE_TAB5_SERIAL = /dev/cu.usbmodem2101   # wired Tab5 peer
+CURSOR_BRIDGE_PTT_MODE    = hold                   # 豆包 长按
+CURSOR_BRIDGE_PTT_KEYCODE = 54                     # right Command
+TAB5_MIC_GAIN             = 5                       # mic stream gain (×)
+```
+
+Reload after editing the plist: `launchctl bootout gui/$(id -u)/com.cursor-bridge
+&& launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cursor-bridge.plist`.
+The daemon-side code (serial writer, `app` routing, screenshot capture, `cmd:key`
+relay, mic→BlackHole sink) lives in `buddy_core/core.py` and is **mirrored**
+across the `feat/sticks3-buddy` (cc-bridge) and `feat/cursor-next`
+(cursor-bridge) checkouts — change both when you touch it.
+
 ## Permission round-trip (M2) — how it works & what's left
 
 Flow: Claude Code PreToolUse → `tools/cc-bridge/hook_permission.py`
@@ -163,10 +187,52 @@ not react. Observed live 2026-06-12. Candidate fixes for a future agent:
 3. Longer `CC_BRIDGE_PERMISSION_TIMEOUT_S` (costs every unanswered tool
    call that much latency in default mode — taste carefully).
 
+## Shipped 2026-06-13 (archived openspec changes)
+
+Wire-protocol additions are all on the **device→daemon control channel** (same
+line stream as `cmd:permission`/`cmd:mic`); none touch the heartbeat schema.
+See `REFERENCE.md` for the external contract and `openspec/specs/` for the
+internal specs (`tab5-dashboard-ui`, `tab5-keyboard-relay`, `tab5-ptt-dictation`,
+`tab5-mic-audio`, `tab5-screenshot`).
+
+- **Dual live feed (`app` tag).** Each daemon stamps its heartbeat with
+  `app:"claude"` / `"cursor"` (`BuddyState.app`, set by `run(app=...)`).
+  Firmware `feed.cpp` routes by it: `cursor`→session 1, else session 0. The
+  Tab5 mic/serial is single-owner, so "two feeds at once" needs a hub
+  (`docs/proposals/tab5-m3-dual-feed.md`); today whichever daemon holds the
+  port shows on its correct tab.
+- **Claude-code UI.** `ui.cpp`: per-role transcript rails (USER/ASSISTANT/
+  TOOL/ERROR/SYSTEM, classified from `you:`/`buddy:`/`!fail` prefixes), a
+  monospace lane (`F_MONO22` = SF Mono + PingFang, repurposed the unused
+  `main30` slot), word-wrap + scrollbar, "Agent Buddy" wordmark, per-tab app
+  icons (`logo40` Claude / `cursor_icon.c` on a light tile), avatar scaled to
+  148 px (`avatarDraw/PushDirect` gained an `outSize`).
+- **Screenshot tool (agent self-verify).** `{"cmd":"shot"}` → firmware streams
+  the sprite as `SHOT <w> <h> <len>` + base64 + `ENDSHOT`; daemon `SerialPortWriter`
+  captures it → stdlib-PNG → `/tmp/tab5-shot.png`. Trigger:
+  `tools/tab5-shot/shot.py` (socket `action:"screenshot"`). **Use this instead
+  of asking the user for photos.** Gotcha: the M5Canvas buffer is byte-swapped
+  RGB565 — `uiScreenshot()` swaps before emit.
+- **Keyboard → Mac second keyboard (`cmd:key`).** No mode toggle: the Tab5
+  keyboard *always* relays (`kbd.cpp`→`feedSendKey`), dashboard is touch-driven.
+  Printables → `{"ch":..}` (Unicode, layout-proof); specials/shortcuts →
+  `{"key":"enter"|"a"..,"mods":[..]}`. Daemon types via Quartz (`kvk_for`,
+  `_type_unicode`/`_type_keycode`).
+- **PTT dictation + mic→BlackHole.** Hold the on-screen mic button → `cmd:mic`
+  down/up (daemon presses the dictation hotkey; persisted as hold + right Cmd
+  for 豆包) **and** the firmware streams 16 kHz mono PCM as `A<base64>` frames.
+  Daemon `_BlackHoleSink` (sounddevice/PortAudio) amplifies (`TAB5_MIC_GAIN`),
+  upsamples 16k→48k stereo, and plays into **BlackHole 2ch** (the dictation
+  app's input). Landmines fixed: rate mismatch (16k vs 48k), and the REC
+  indicator's blink forced full-frame repaints that starved the 16 kHz capture
+  → made it **solid** (no per-tick repaint while held). New host dep:
+  `portaudio` + `sounddevice` in the cursor-bridge venv.
+
 ## Other open work
 
-- **M3**: second session feed from cursor-bridge (protocol identical; UI
-  already renders two session cards, `g_sel` switches).
+- **True simultaneous dual-feed**: one USB serial port can't be shared by two
+  daemons; the `tab5-hub` design (`docs/proposals/tab5-m3-dual-feed.md`) or a
+  WiFi second transport is the path. Today: single owner per tab.
 - **Volume**: speaker volume hardcoded 160/255 in `sound.cpp` — wants a
   settings module (stackchan's NVS settings.cpp is the template).
 - **Tear-free rendering**: dirty-band pushes killed the visible wipe; true

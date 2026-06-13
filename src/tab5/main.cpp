@@ -61,10 +61,31 @@ void loop() {
   kbdPoll();    // decoded USB keyboard keys → UI
   soundTick();  // hand I2S back to the mic when a clip finishes
 
-  if (M5.Mic.record(micBuf, 256, 16000)) {
-    int peak = 0;
-    for (auto s : micBuf) { int a = s < 0 ? -s : s; if (a > peak) peak = a; }
-    micPeak = peak > micPeak ? peak : micPeak - (micPeak >> 3);
+  // While push-to-talk is held, capture 16 kHz mono in 20 ms chunks and stream
+  // them to the daemon (→ BlackHole). Ping-pong two buffers so playback is
+  // gapless: when record() accepts a new buffer, the other one just finished.
+  static int16_t aud[2][320];
+  static int  aIdx = 0;
+  static bool aPrimed = false;
+  if (uiMicHeld()) {
+    if (M5.Mic.record(aud[aIdx], 320, 16000)) {
+      if (aPrimed) {
+        const int16_t* done = aud[aIdx ^ 1];
+        feedSendAudio(done, 320);
+        int peak = 0;
+        for (int i = 0; i < 320; i++) { int a = done[i] < 0 ? -done[i] : done[i]; if (a > peak) peak = a; }
+        micPeak = peak > micPeak ? peak : micPeak - (micPeak >> 3);
+      }
+      aPrimed = true;
+      aIdx ^= 1;
+    }
+  } else {
+    aPrimed = false;
+    if (M5.Mic.record(micBuf, 256, 16000)) {
+      int peak = 0;
+      for (auto s : micBuf) { int a = s < 0 ? -s : s; if (a > peak) peak = a; }
+      micPeak = peak > micPeak ? peak : micPeak - (micPeak >> 3);
+    }
   }
 
   // Power policy: never blank — dim to 25% after 2 min without touch,
