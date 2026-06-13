@@ -45,9 +45,12 @@ import time
 import asyncio
 import pathlib
 
-# Allow `from buddy_core import ...` when launched as a standalone script.
+# Allow `from buddy_core import ...` AND `from dashboard import ...`
+# when launched as a standalone script.
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from buddy_core import run, BuddyState
+from dashboard import start_dashboard, DEFAULT_PORT as DASH_DEFAULT_PORT
 
 # ─── config ────────────────────────────────────────────────────────────
 SOCKET_PATH = os.environ.get("CURSOR_BRIDGE_SOCKET", "/tmp/cursor-bridge.sock")
@@ -59,6 +62,9 @@ PTT_KEYCODE = int(os.environ.get("CURSOR_BRIDGE_PTT_KEYCODE", "61"))  # right Op
 # "tap" = Typeless toggle (default); "hold" = Doubao 长按 / classic PTT;
 # "double_tap" = Doubao 免按. See tools/buddy_core/core.py:make_on_stick_line.
 PTT_MODE = os.environ.get("CURSOR_BRIDGE_PTT_MODE", "tap")
+# Wired Tab5 peer (USB-CDC serial). Empty = disabled. The same heartbeat
+# goes down the wire; {"cmd":"permission"...} / mic lines come back.
+TAB5_SERIAL = os.environ.get("CURSOR_BRIDGE_TAB5_SERIAL", "")
 
 # cursor-bridge talks to the firmware's debug service (unencrypted) just
 # like cc-bridge — the firmware mirrors notifies to both the encrypted
@@ -139,10 +145,10 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             changed = True
         txt = ev.get("text") or ""
         if txt:
-            # Single-line collapse — REFERENCE.md caps each entry at ~91
-            # chars; add_entry() truncates further. Strip leading whitespace
-            # so the indent doesn't waste display columns.
-            state.add_entry(f"buddy: {txt.replace(chr(10), ' ').strip()}")
+            # Collapse newlines to spaces (the Tab5 word-wraps) and keep a
+            # longer slice than the 91-char default so the answer isn't cut
+            # mid-sentence. 200 fits the firmware's per-line buffer (LINEW).
+            state.add_entry(f"buddy: {txt.replace(chr(10), ' ').strip()}", max_len=200)
             changed = True
 
     elif name == "PreToolUse":
@@ -239,6 +245,16 @@ def _cursor_log_fmt(payload: dict) -> str:
     )
 
 
+DASH_PORT = int(os.environ.get("CURSOR_BRIDGE_DASH_PORT", str(DASH_DEFAULT_PORT)))
+
+
+def _on_loop_start(ble, loop, log, state: BuddyState):
+    if DASH_PORT > 0:
+        start_dashboard(state, ble, loop, log=log, port=DASH_PORT)
+    else:
+        log.info("dashboard disabled (CURSOR_BRIDGE_DASH_PORT=0)")
+
+
 if __name__ == "__main__":
     run(
         name="cursor-bridge",
@@ -252,4 +268,7 @@ if __name__ == "__main__":
         rtc_sync_on_connect=True,   # no Claude Desktop in the loop for cursor
         extra_tasks=[reaper_loop],
         log_fmt=_cursor_log_fmt,
+        on_loop_start=_on_loop_start,
+        serial_port=TAB5_SERIAL or None,
+        app="cursor",
     )

@@ -53,6 +53,15 @@ class BuddyState:
     prompt: dict | None = None
     completed: bool = False  # set briefly after Stop, cleared on next emit
 
+    # Source tag for multi-feed routing on a shared link (Tab5 dual-feed,
+    # M3). "" omits the field (back-compatible). Set once by run(app=...).
+    app: str = ""
+
+    # Stick health snapshot from periodic {"cmd":"telemetry"} push. Not
+    # part of the heartbeat payload — internal-only for dashboards. dict
+    # shape: {"bat": {"pct","mV","usb"}, "imu": {"ax","ay","az"}, "ts": float}.
+    stick_telemetry: dict | None = None
+
     # internal — not sent
     # session_id -> {"running": bool, ...}  (bridges may add "last_seen")
     _sessions: dict = field(default_factory=dict)
@@ -67,6 +76,8 @@ class BuddyState:
             "tokens": self.tokens,
             "tokens_today": self.tokens_today,
         }
+        if self.app:
+            p["app"] = self.app
         if self.completed:
             p["completed"] = True
             self.completed = False  # one-shot
@@ -74,9 +85,11 @@ class BuddyState:
             p["prompt"] = self.prompt
         return p
 
-    def add_entry(self, line: str):
-        # Newest first, capped — matches REFERENCE.md "newest first".
-        self.entries.insert(0, line[:91])
+    def add_entry(self, line: str, max_len: int = 91):
+        # Newest first, capped — matches REFERENCE.md "newest first". Tool/you
+        # lines keep the 91-char default; the assistant answer passes a larger
+        # max_len so the Tab5 (which word-wraps) shows it in full.
+        self.entries.insert(0, line[:max_len])
         del self.entries[8:]
 
 
@@ -144,8 +157,77 @@ def _send_key(keycode: int, down: bool) -> None:
     CGEventPost(kCGHIDEventTap, ev)
 
 
+# ─── keyboard relay (Tab5 as a Mac second keyboard) ────────────────────
+# kVK keycodes (ANSI US layout) for named keys + letters/digits, used by the
+# cmd:key relay. Printable characters are typed via Unicode (layout-proof);
+# shortcuts / special keys use these keycodes + modifier flags.
+_KVK_SPECIAL = {
+    "enter": 0x24, "return": 0x24, "tab": 0x30, "space": 0x31,
+    "backspace": 0x33, "delete": 0x33, "esc": 0x35, "escape": 0x35,
+    "left": 0x7B, "right": 0x7C, "down": 0x7D, "up": 0x7E, "fwddelete": 0x75,
+}
+_KVK_CHAR = {
+    "a": 0x00, "b": 0x0B, "c": 0x08, "d": 0x02, "e": 0x0E, "f": 0x03, "g": 0x05,
+    "h": 0x04, "i": 0x22, "j": 0x26, "k": 0x28, "l": 0x25, "m": 0x2E, "n": 0x2D,
+    "o": 0x1F, "p": 0x23, "q": 0x0C, "r": 0x0F, "s": 0x01, "t": 0x11, "u": 0x20,
+    "v": 0x09, "w": 0x0D, "x": 0x07, "y": 0x10, "z": 0x06,
+    "0": 0x1D, "1": 0x12, "2": 0x13, "3": 0x14, "4": 0x15, "5": 0x17, "6": 0x16,
+    "7": 0x1A, "8": 0x1C, "9": 0x19,
+}
+# mod name → CGEventFlagMask
+_MOD_MASK = {"cmd": 0x100000, "shift": 0x020000, "opt": 0x080000,
+             "alt": 0x080000, "ctrl": 0x040000}
+
+
+def kvk_for(name: str):
+    """Resolve a key name to a kVK keycode (specials, then single char)."""
+    name = (name or "").lower()
+    kc = _KVK_SPECIAL.get(name)
+    if kc is None and len(name) == 1:
+        kc = _KVK_CHAR.get(name)
+    return kc
+
+
+def _type_unicode(ch: str) -> None:
+    try:
+        from Quartz import (
+            CGEventCreateKeyboardEvent, CGEventKeyboardSetUnicodeString,
+            CGEventPost, kCGHIDEventTap,
+        )
+    except Exception as e:
+        _log.warning("Quartz not available, key relay disabled: %s", e)
+        return
+    for down in (True, False):
+        ev = CGEventCreateKeyboardEvent(None, 0, down)
+        if ev is None:
+            continue
+        CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
+        CGEventPost(kCGHIDEventTap, ev)
+
+
+def _type_keycode(keycode: int, mods) -> None:
+    try:
+        from Quartz import (
+            CGEventCreateKeyboardEvent, CGEventSetFlags, CGEventPost, kCGHIDEventTap,
+        )
+    except Exception as e:
+        _log.warning("Quartz not available, key relay disabled: %s", e)
+        return
+    flags = 0
+    for m in (mods or []):
+        flags |= _MOD_MASK.get(str(m).lower(), 0)
+    for down in (True, False):
+        ev = CGEventCreateKeyboardEvent(None, keycode, down)
+        if ev is None:
+            continue
+        if flags:
+            CGEventSetFlags(ev, flags)
+        CGEventPost(kCGHIDEventTap, ev)
+
+
 def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
-                       log: logging.Logger) -> tuple[Callable[[str], None], dict]:
+                       log: logging.Logger,
+                       state: "BuddyState | None" = None) -> tuple[Callable[[str], None], dict]:
     """Factory: returns (on_stick_line callback, PENDING dict).
 
     Keeping PENDING inside the closure means each daemon gets an isolated
@@ -194,21 +276,52 @@ def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
                 fut.get_loop().call_soon_threadsafe(_safe_set, fut, decision)
             return
 
+        if cmd == "telemetry":
+            # Periodic stick health beat: battery + IMU. Logged + stashed
+            # on BuddyState for dashboard surfacing.
+            bat = obj.get("bat") or {}
+            imu = obj.get("imu") or {}
+            log.info("telem bat=%s%%/%smV usb=%s imu=(%s,%s,%s)",
+                     bat.get("pct"), bat.get("mV"), bat.get("usb"),
+                     imu.get("ax"), imu.get("ay"), imu.get("az"))
+            if state is not None:
+                state.stick_telemetry = {"bat": bat, "imu": imu, "ts": time.time()}
+            return
+
         if cmd == "mic":
-            state = (obj.get("state") or "").lower()
-            if state not in ("down", "up"):
+            mic_state = (obj.get("state") or "").lower()
+            if mic_state not in ("down", "up"):
                 return
             if mode == "hold":
-                log.info("mic %s → key %d %s", state, ptt_keycode,
-                         "down" if state == "down" else "up")
-                _send_key(ptt_keycode, state == "down")
+                log.info("mic %s → key %d %s", mic_state, ptt_keycode,
+                         "down" if mic_state == "down" else "up")
+                _send_key(ptt_keycode, mic_state == "down")
             elif mode == "double_tap":
-                log.info("mic %s → double-tap key %d", state, ptt_keycode)
+                log.info("mic %s → double-tap key %d", mic_state, ptt_keycode)
                 _double_tap()
             else:  # tap
-                log.info("mic %s → tap key %d", state, ptt_keycode)
+                log.info("mic %s → tap key %d", mic_state, ptt_keycode)
                 _send_key(ptt_keycode, True)
                 _send_key(ptt_keycode, False)
+            return
+
+        if cmd == "key":
+            # Tab5 keyboard → Mac second keyboard. Printable chars come as
+            # {"ch":"x"} (typed via Unicode, layout-proof); special keys and
+            # shortcuts come as {"key":"<name>","mods":[...]} (kVK + flags).
+            name = obj.get("key")
+            ch = obj.get("ch")
+            mods = obj.get("mods") or []
+            if name:
+                kc = kvk_for(name)
+                if kc is not None:
+                    log.info("key %s mods=%s → kVK 0x%02x", name, mods, kc)
+                    _type_keycode(kc, mods)
+                else:
+                    log.warning("key relay: unknown key name %r", name)
+            elif isinstance(ch, str) and ch:
+                log.info("key ch=%r → unicode", ch)
+                _type_unicode(ch)
             return
 
     return on_stick_line, pending
@@ -308,7 +421,11 @@ class BleWriter:
 
     async def write(self, payload: dict):
         async with self._lock:
-            if not await self.ensure_connected():
+            # Never scan inline: ensure_connected() for an offline peer runs
+            # a BleakScanner.discover(SCAN_TIMEOUT=8s). When composed with a
+            # wired serial peer (Tab5), an absent BLE stick must not stall the
+            # serial heartbeat behind its scan. reconnect_loop owns reconnect.
+            if not self.any_connected:
                 self._log.warning("write skipped: not connected")
                 return
             line = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
@@ -339,6 +456,373 @@ class BleWriter:
                     pass
                 self.client = None
 
+    @property
+    def any_connected(self) -> bool:
+        return bool(self.client and self.client.is_connected)
+
+
+# ─── screenshot capture (Tab5 framebuffer → PNG, stdlib only) ──────────
+def _rgb565_to_rgb888(raw: bytes, w: int, h: int) -> bytes:
+    out = bytearray(w * h * 3)
+    o = 0
+    n = min(len(raw) - 1, w * h * 2)
+    for i in range(0, n, 2):
+        v = raw[i] | (raw[i + 1] << 8)          # little-endian RGB565
+        r = (v >> 11) & 0x1F
+        g = (v >> 5) & 0x3F
+        b = v & 0x1F
+        out[o] = (r << 3) | (r >> 2)
+        out[o + 1] = (g << 2) | (g >> 4)
+        out[o + 2] = (b << 3) | (b >> 2)
+        o += 3
+    return bytes(out)
+
+
+def _write_png(path: str, w: int, h: int, rgb: bytes) -> None:
+    """Minimal RGB PNG writer using only the stdlib (zlib)."""
+    import struct
+    import zlib
+
+    def _chunk(typ: bytes, data: bytes) -> bytes:
+        body = typ + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    stride = w * 3
+    raw = bytearray()
+    for y in range(h):
+        raw.append(0)                            # filter type 0 (None)
+        raw += rgb[y * stride:(y + 1) * stride]
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)   # 8-bit, truecolor RGB
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(_chunk(b"IHDR", ihdr))
+        f.write(_chunk(b"IDAT", zlib.compress(bytes(raw), 6)))
+        f.write(_chunk(b"IEND", b""))
+
+
+# ─── Tab5 mic → BlackHole audio sink (sounddevice / PortAudio) ─────────
+class _BlackHoleSink:
+    """Plays streamed 16 kHz mono S16 PCM into a CoreAudio device (BlackHole),
+    so a dictation app whose input is that device hears the Tab5 mic. Lazily
+    opens on the first frame; closes on idle. PortAudio pulls from a buffer via
+    a callback so the asyncio loop never blocks on audio I/O."""
+
+    IN_RATE = 16000          # firmware streams 16 kHz mono
+    OUT_RATE = 48000         # BlackHole's native rate; Doubao reads it at 48k
+    OUT_CH = 2               # …in stereo
+    UP = OUT_RATE // IN_RATE  # integer upsample factor (3)
+
+    def __init__(self, device_name: str, log: logging.Logger):
+        self._device_name = device_name
+        self._log = log
+        self._buf = bytearray()
+        self._lock = __import__("threading").Lock()
+        self._stream = None
+        self._max = self.OUT_RATE * self.OUT_CH * 2 * 2   # ~2 s cap (out bytes)
+        self._gain = float(os.environ.get("TAB5_MIC_GAIN", "5"))  # boost quiet mic
+        self._fed = 0            # input bytes this session (diagnostic)
+
+    def _transform(self, pcm: bytes) -> bytes:
+        # amplify (16 kHz mono), then upsample ×UP and duplicate to stereo so
+        # the stream matches BlackHole's 48 kHz/2ch that the dictation app reads.
+        import array
+        a = array.array("h")
+        a.frombytes(pcm)
+        g = self._gain
+        out = array.array("h", bytes(len(a) * self.UP * self.OUT_CH * 2))
+        j = 0
+        for s in a:
+            if g != 1.0:
+                v = int(s * g)
+                s = 32767 if v > 32767 else (-32768 if v < -32768 else v)
+            for _ in range(self.UP):
+                out[j] = s; out[j + 1] = s
+                j += 2
+        return out.tobytes()
+
+    def _device_index(self):
+        import sounddevice as sd
+        for i, d in enumerate(sd.query_devices()):
+            if d["max_output_channels"] > 0 and self._device_name in d["name"]:
+                return i
+        return None
+
+    def _cb(self, outdata, frames, time_info, status):
+        need = len(outdata)
+        with self._lock:
+            avail = min(need, len(self._buf))
+            outdata[:avail] = bytes(self._buf[:avail])
+            del self._buf[:avail]
+        if avail < need:
+            outdata[avail:] = b"\x00" * (need - avail)
+
+    def start(self) -> bool:
+        if self._stream is not None:
+            return True
+        try:
+            import sounddevice as sd
+            idx = self._device_index()
+            if idx is None:
+                self._log.warning("audio sink: device %r not found", self._device_name)
+                return False
+            self._stream = sd.RawOutputStream(
+                samplerate=self.OUT_RATE, channels=self.OUT_CH, dtype="int16",
+                device=idx, callback=self._cb, blocksize=0)
+            self._stream.start()
+            self._log.info("audio sink open: %s (idx %d)", self._device_name, idx)
+            return True
+        except Exception as e:
+            self._log.warning("audio sink open failed: %s", e)
+            self._stream = None
+            return False
+
+    def feed(self, pcm: bytes):
+        if self._stream is None and not self.start():
+            return
+        self._fed += len(pcm)
+        pcm = self._transform(pcm)
+        with self._lock:
+            self._buf += pcm
+            if len(self._buf) > self._max:        # drop oldest, keep recent
+                del self._buf[:len(self._buf) - self._max]
+
+    def stop(self):
+        s, self._stream = self._stream, None
+        if s:
+            try:
+                s.stop(); s.close()
+            except Exception:
+                pass
+        if self._fed:
+            self._log.info("audio sink closed: %.2f s of input", self._fed / 2 / self.IN_RATE)
+            self._fed = 0
+        with self._lock:
+            self._buf.clear()
+
+
+class SerialPortWriter:
+    """NDJSON over a USB-CDC serial port — the Tab5's default link.
+
+    Same duck-typed surface as BleWriter (any_connected / ensure_connected /
+    write / close). The port comes and goes (flashing, unplug):
+    ensure_connected() reopens it, the rx task exits on error and is respawned
+    on the next successful open.
+    """
+
+    def __init__(self, port: str, on_tx_line=None,
+                 log: logging.Logger | None = None, baud: int = 115200):
+        self._port_path = port
+        self._baud = baud
+        self._on_tx_line = on_tx_line
+        self._log = log or _log
+        self._ser = None
+        self._rx_task = None
+        self._tx_lock = asyncio.Lock()
+        self._on_connect_cb: Callable | None = None
+        # screenshot capture state (SHOT … ENDSHOT frame → PNG)
+        self._shot_capturing = False
+        self._shot_w = self._shot_h = self._shot_len = 0
+        self._shot_b64: list[str] = []
+        self._shot_path = os.environ.get("TAB5_SHOT_PATH", "/tmp/tab5-shot.png")
+        self._shot_event = asyncio.Event()
+        # Tab5 mic → BlackHole audio stream (A<base64> frames)
+        self._sink = _BlackHoleSink(os.environ.get("TAB5_MIC_SINK", "BlackHole"), self._log)
+        self._audio_last = 0.0
+
+    @property
+    def any_connected(self) -> bool:
+        return self._ser is not None and getattr(self._ser, "is_open", False)
+
+    async def ensure_connected(self) -> bool:
+        if self.any_connected:
+            return True
+        try:
+            import serial  # pyserial — lazy so BLE-only deployments don't need it
+            self._ser = serial.Serial(self._port_path, self._baud, timeout=0)
+        except Exception as e:
+            self._ser = None
+            self._log.debug("serial open failed (%s): %s", self._port_path, e)
+            return False
+        self._log.info("serial connected: %s", self._port_path)
+        if self._rx_task is None or self._rx_task.done():
+            self._rx_task = asyncio.create_task(self._rx_loop())
+        if self._on_connect_cb:
+            try:
+                self._on_connect_cb()
+            except Exception:
+                self._log.exception("serial on_connect_cb failed")
+        return True
+
+    async def _rx_loop(self):
+        buf = b""
+        loop = asyncio.get_event_loop()
+        while True:
+            ser = self._ser
+            if ser is None or not getattr(ser, "is_open", False):
+                return
+            try:
+                chunk = await loop.run_in_executor(None, ser.read, 4096)
+            except Exception as e:
+                self._log.info("serial dropped: %s", e)
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                if self._ser is ser:
+                    self._ser = None
+                return
+            if chunk:
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode("utf-8", errors="replace").strip()
+                    # screenshot frame capture takes priority over dispatch
+                    if self._shot_capturing:
+                        if text == "ENDSHOT":
+                            self._finish_shot()
+                        elif text:
+                            self._shot_b64.append(text)
+                            if len(self._shot_b64) > 4000:   # runaway guard
+                                self._log.warning("shot frame too long; aborting")
+                                self._shot_capturing = False
+                                self._shot_b64 = []
+                        continue
+                    if text.startswith("SHOT "):
+                        try:
+                            p = text.split()
+                            self._shot_w, self._shot_h, self._shot_len = (
+                                int(p[1]), int(p[2]), int(p[3]))
+                            self._shot_b64 = []
+                            self._shot_capturing = True
+                        except Exception:
+                            self._log.warning("bad SHOT header: %r", text)
+                        continue
+                    # mic audio frame (A<base64> S16LE) → BlackHole sink
+                    if len(text) > 1 and text[0] == "A":
+                        import base64
+                        try:
+                            self._sink.feed(base64.b64decode(text[1:]))
+                            self._audio_last = time.monotonic()
+                        except Exception:
+                            pass
+                        continue
+                    # close the audio sink shortly after the stream stops
+                    if self._audio_last and time.monotonic() - self._audio_last > 0.6:
+                        self._audio_last = 0.0
+                        self._sink.stop()
+                    # The same port carries firmware debug prints; only JSON
+                    # lines go to the dispatcher.
+                    if text.startswith("{") and self._on_tx_line:
+                        try:
+                            self._on_tx_line(text)
+                        except Exception:
+                            self._log.exception("serial rx line failed")
+            else:
+                await asyncio.sleep(0.05)
+
+    def _finish_shot(self):
+        self._shot_capturing = False
+        import base64
+        b64 = "".join(self._shot_b64)
+        self._shot_b64 = []
+        try:
+            raw = base64.b64decode(b64)
+        except Exception as e:
+            self._log.warning("shot b64 decode failed: %s", e)
+            return
+        w, h = self._shot_w, self._shot_h
+        if len(raw) < w * h * 2:
+            self._log.warning("shot short: got %d want %d", len(raw), w * h * 2)
+            return
+        try:
+            _write_png(self._shot_path, w, h, _rgb565_to_rgb888(raw, w, h))
+            self._log.info("shot saved: %s (%dx%d)", self._shot_path, w, h)
+        except Exception:
+            self._log.exception("shot png write failed")
+            return
+        self._shot_event.set()
+
+    async def screenshot(self, timeout: float = 8.0):
+        """Request a frame from the device and return the written PNG path."""
+        self._shot_event.clear()
+        await self.write({"cmd": "shot"})
+        try:
+            await asyncio.wait_for(self._shot_event.wait(), timeout)
+        except asyncio.TimeoutError:
+            return None
+        return self._shot_path
+
+    async def write(self, payload: dict):
+        ser = self._ser
+        if ser is None or not getattr(ser, "is_open", False):
+            return
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode()
+        async with self._tx_lock:
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, ser.write, data)
+            except Exception as e:
+                self._log.info("serial write failed: %s", e)
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                if self._ser is ser:
+                    self._ser = None
+
+    async def close(self):
+        ser, self._ser = self._ser, None
+        if ser:
+            try:
+                ser.close()
+            except Exception:
+                pass
+        task, self._rx_task = self._rx_task, None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+class CompositeWriter:
+    """Fan-out across heterogeneous writers (BLE peer + serial port)."""
+
+    def __init__(self, writers: list, log: logging.Logger | None = None):
+        self._writers = writers
+        self._log = log or _log
+        self._on_connect_cb: Callable | None = None
+
+    @property
+    def any_connected(self) -> bool:
+        return any(w.any_connected for w in self._writers)
+
+    async def ensure_connected(self) -> bool:
+        rs = await asyncio.gather(
+            *(w.ensure_connected() for w in self._writers),
+            return_exceptions=True,
+        )
+        return all((not isinstance(r, Exception)) and bool(r) for r in rs)
+
+    async def write(self, payload: dict):
+        await asyncio.gather(
+            *(w.write(payload) for w in self._writers),
+            return_exceptions=True,
+        )
+
+    async def screenshot(self, timeout: float = 8.0):
+        for w in self._writers:
+            if hasattr(w, "screenshot"):
+                return await w.screenshot(timeout)
+        return None
+
+    async def close(self):
+        await asyncio.gather(
+            *(w.close() for w in self._writers),
+            return_exceptions=True,
+        )
+
 
 # ─── socket protocol ───────────────────────────────────────────────────
 async def handle_client(reader, writer, state: BuddyState, ble: BleWriter,
@@ -359,6 +843,19 @@ async def handle_client(reader, writer, state: BuddyState, ble: BleWriter,
 
         if isinstance(head, dict) and head.get("action") == "wait_permission":
             await _handle_wait_permission(head, writer, state, dirty, pending, log)
+            return
+
+        if isinstance(head, dict) and head.get("action") == "screenshot":
+            path = None
+            try:
+                if hasattr(ble, "screenshot"):
+                    path = await ble.screenshot(float(head.get("timeout", 8.0)))
+            except Exception as e:
+                log.warning("screenshot action failed: %s", e)
+            resp = ({"ok": True, "path": path} if path
+                    else {"ok": False, "error": "no frame"})
+            writer.write((json.dumps(resp) + "\n").encode())
+            await writer.drain()
             return
 
         # Otherwise: treat each line as a hook event.
@@ -462,11 +959,14 @@ async def heartbeat_loop(state: BuddyState, ble: BleWriter,
             await asyncio.sleep(1)
 
 
-async def reconnect_loop(ble: BleWriter, log: logging.Logger):
-    """Background watchdog: try to keep BLE alive."""
+async def reconnect_loop(ble, log: logging.Logger):
+    """Background watchdog: try to keep the writer(s) alive.
+
+    Works for a single BleWriter or a CompositeWriter (BLE + serial); both
+    expose ``any_connected`` / ``ensure_connected``."""
     backoff_idx = 0
     while True:
-        if ble.client and ble.client.is_connected:
+        if ble.any_connected:
             backoff_idx = 0
             await asyncio.sleep(5)
             continue
@@ -493,6 +993,9 @@ def run(
     on_connect_cb: Callable | None = None,
     extra_tasks: list[Callable] | None = None,
     log_fmt: Callable[[dict], str] | None = None,
+    on_loop_start: Callable | None = None,
+    serial_port: str | None = None,
+    app: str = "",
 ) -> None:
     """Configure logging, wire everything up, and run the event loop.
 
@@ -525,7 +1028,14 @@ def run(
     )
     log = logging.getLogger(name)
 
-    on_stick_line, pending = make_on_stick_line(ptt_keycode, ptt_mode, log)
+    # State must exist before make_on_stick_line so the telemetry handler
+    # has somewhere to stash readings for the dashboard. Previously this
+    # was created inside _main(); lifted to outer scope so it's a single
+    # shared instance across the BLE writer and the async event loop.
+    state = BuddyState()
+    state.app = app
+
+    on_stick_line, pending = make_on_stick_line(ptt_keycode, ptt_mode, log, state=state)
 
     ble = BleWriter(
         device_prefix=device_prefix,
@@ -536,6 +1046,15 @@ def run(
     if on_connect_cb:
         ble._on_connect_cb = on_connect_cb
 
+    # Optional wired peer (Tab5 over USB-CDC) — same heartbeat fan-out, same
+    # inbound dispatcher. Composes with the BLE writer built above.
+    if serial_port:
+        ser_w = SerialPortWriter(serial_port, on_tx_line=on_stick_line, log=log)
+        if on_connect_cb:
+            ser_w._on_connect_cb = on_connect_cb
+        log.info("serial peer enabled: %s", serial_port)
+        ble = CompositeWriter([ble, ser_w], log=log)
+
     async def _main():
         # Clean up stale socket.
         try:
@@ -543,7 +1062,6 @@ def run(
         except FileNotFoundError:
             pass
 
-        state = BuddyState()
         dirty = asyncio.Event()
 
         server = await asyncio.start_unix_server(
@@ -555,6 +1073,22 @@ def run(
 
         # Graceful shutdown
         loop = asyncio.get_running_loop()
+
+        # Optional sync init that needs both ble + the running loop —
+        # used to start a localhost dashboard HTTP server. Called before
+        # the main tasks so any HTTP client connecting at t=0 sees a
+        # functioning ble writer + state.
+        if on_loop_start:
+            try:
+                import inspect
+                sig_ = inspect.signature(on_loop_start)
+                if len(sig_.parameters) >= 4:
+                    on_loop_start(ble, loop, log, state)
+                else:
+                    on_loop_start(ble, loop, log)
+            except Exception as e:
+                log.warning("on_loop_start failed (non-fatal): %s", e)
+
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)
