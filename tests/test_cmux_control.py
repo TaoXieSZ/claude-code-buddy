@@ -344,6 +344,20 @@ def test_focus_by_checkpoint_focuses_matching_surface():
         ["CMUX", "rpc", "surface.focus", json.dumps({"surface_id": "S1"})]
 
 
+def test_focus_by_checkpoint_raises_cmux_app():
+    # After focusing the pane, the cmux app is raised to the macOS foreground
+    # so the switch is visible even when another app was frontmost.
+    m = MockRunner()
+    c = CmuxClient(binary="CMUX", runner=m)  # no "/Contents/" → open -a fallback
+    assert c.focus_by_checkpoint("CKPT-S1") == "S1"
+    assert ["open", "-a", "cmux"] in m.calls
+
+
+def test_app_bundle_derived_from_binary_path():
+    c = CmuxClient(binary="/Applications/cmux.app/Contents/Resources/bin/cmux")
+    assert c._app_bundle() == "/Applications/cmux.app"
+
+
 def test_focus_by_checkpoint_unknown_returns_none_and_no_focus():
     m = MockRunner()
     c = CmuxClient(binary="CMUX", runner=m)

@@ -626,7 +626,30 @@ class CmuxClient:
         if match is None:
             return None
         rc, _out, _err = self.run(self._focus_argv(match.surface))
-        return match.surface if rc == 0 else None
+        if rc != 0:
+            return None
+        # surface.focus only focuses the pane *inside* cmux; if the cmux app
+        # isn't frontmost the user never sees the switch. Raise it to the macOS
+        # foreground too (best-effort — switcher still "succeeds" if this fails).
+        self.activate_app()
+        return match.surface
+
+    def _app_bundle(self) -> Optional[str]:
+        """The .app bundle for self.binary (…/cmux.app/Contents/…/cmux → …/cmux.app)."""
+        marker = "/Contents/"
+        i = self.binary.find(marker)
+        return self.binary[:i] if i != -1 else None
+
+    def activate_app(self) -> None:
+        """Bring the cmux macOS app to the foreground. Best-effort: `open` the
+        bundle if we can derive it, else `open -a cmux`. Failures are swallowed
+        so a missing/renamed app never breaks the session switch."""
+        bundle = self._app_bundle()
+        argv = ["open", bundle] if bundle else ["open", "-a", "cmux"]
+        try:
+            self.run(argv)
+        except Exception:
+            pass
 
     def session_labels(self) -> dict:
         """{checkpoint_id: human label} for all live claude surfaces.
