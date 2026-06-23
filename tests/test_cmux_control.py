@@ -17,6 +17,7 @@ from control_plane.cmux_control import (
     CmuxClient,
     Session,
     build_sessions,
+    label_from_title,
     resolve,
     resolve_target,
 )
@@ -81,7 +82,8 @@ SURF = {
          "title": "cd '/x/tools' && python3 -m control_plane.board --watch",
          "focused": False},
         {"id": "S1", "ref": "surface:22", "index": 1, "type": "terminal",
-         "title": "claude-desktop-buddy · 229a873b", "focused": True},
+         "title": "claude-desktop-buddy · 229a873b", "focused": True,
+         "resume_binding": {"kind": "claude", "checkpoint_id": "CKPT-S1"}},
         {"id": "SBR", "ref": "surface:21", "index": 2, "type": "browser",
          "title": "Talk to your voice agent | Agora", "focused": False},
     ]}),
@@ -150,6 +152,23 @@ def test_build_orders_by_index_not_array_order():
 
 def test_build_empty():
     assert _build(json.dumps({"workspaces": []}), {}) == []
+
+
+def test_build_extracts_claude_checkpoint_id():
+    # A claude pane exposes its session_id via resume_binding.checkpoint_id;
+    # a plain shell (no resume_binding) gets "".
+    by_surf = {x.surface: x.checkpoint_id for x in _build()}
+    assert by_surf["S1"] == "CKPT-S1"
+    assert by_surf["S2"] == ""
+
+
+def test_build_ignores_checkpoint_for_non_claude_binding():
+    ws = json.dumps({"workspaces": [
+        {"id": "W", "index": 0, "selected": True, "current_directory": "/x"}]})
+    surf = {"W": json.dumps({"surfaces": [
+        {"id": "sh", "index": 0, "type": "terminal", "title": "shell",
+         "resume_binding": {"kind": "shell", "checkpoint_id": "NOPE"}}]})}
+    assert _build(ws, surf)[0].checkpoint_id == ""
 
 
 # ─── nicknames ─────────────────────────────────────────────────────────
@@ -315,6 +334,52 @@ def test_list_sessions_spans_multiple_windows():
     surfaces = [s.surface for s in sessions]
     assert "a1" in surfaces and "b1" in surfaces  # both windows visible
     assert len(sessions) == 2
+
+
+def test_focus_by_checkpoint_focuses_matching_surface():
+    m = MockRunner()
+    c = CmuxClient(binary="CMUX", runner=m)
+    assert c.focus_by_checkpoint("CKPT-S1") == "S1"
+    assert _method_call(m.calls, "surface.focus") == \
+        ["CMUX", "rpc", "surface.focus", json.dumps({"surface_id": "S1"})]
+
+
+def test_focus_by_checkpoint_unknown_returns_none_and_no_focus():
+    m = MockRunner()
+    c = CmuxClient(binary="CMUX", runner=m)
+    assert c.focus_by_checkpoint("no-such-session") is None
+    assert all(not (len(call) > 2 and call[2] == "surface.focus") for call in m.calls)
+
+
+def test_focus_by_checkpoint_empty_id_makes_no_cmux_calls():
+    m = MockRunner()
+    c = CmuxClient(binary="CMUX", runner=m)
+    assert c.focus_by_checkpoint("") is None
+    assert m.calls == []  # short-circuits before any subprocess
+
+
+def test_label_from_title_pure_autoname():
+    # auto-name generated → title is a single pure name.
+    assert label_from_title("hardware-buddies-setup") == "hardware-buddies-setup"
+
+
+def test_label_from_title_repo_prompt_sid():
+    # before auto-name: "<repo> · <prompt> · <sid>" → take the middle part.
+    assert label_from_title(
+        "hardware-buddies · Please analyze this · 41af42bb-fb94") == "Please analyze this"
+
+
+def test_label_from_title_empty():
+    assert label_from_title("") == ""
+    assert label_from_title("   ") == ""
+
+
+def test_session_labels_maps_checkpoint_to_label():
+    # Only S1 carries a claude checkpoint_id (CKPT-S1); its title's middle
+    # segment is the label.
+    m = MockRunner()
+    c = CmuxClient(binary="CMUX", runner=m)
+    assert c.session_labels() == {"CKPT-S1": "229a873b"}
 
 
 def test_read_status_returns_last_nonempty_line():

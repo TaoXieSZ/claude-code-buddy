@@ -161,6 +161,8 @@ class Session:
     title: str         # terminal title (repo·id for Claude Code, user@host:~/p for a shell)
     cwd: str           # owning workspace current_directory (cmux has no per-pane cwd)
     focused: bool      # the currently focused pane (globally — see build_sessions)
+    checkpoint_id: str = ""  # Claude session_id (= resume_binding.checkpoint_id for a
+                             # claude agent pane); "" for shells / non-claude surfaces.
 
     # Back-compat alias for board.build_board(), which reads `.selected`.
     @property
@@ -212,6 +214,11 @@ def build_sessions(
             n += 1
             sid = s.get("id", "")
             nickname = registry.assign(sid) if sid else ""
+            # A claude agent pane carries its Claude session_id under
+            # resume_binding.checkpoint_id (cmux's --resume key). Only trust it
+            # when kind == "claude"; shells / other agents get "".
+            rb = s.get("resume_binding") or {}
+            checkpoint_id = rb.get("checkpoint_id", "") if rb.get("kind") == "claude" else ""
             sessions.append(
                 Session(
                     number=n,
@@ -223,6 +230,7 @@ def build_sessions(
                     # `focused` is per-workspace; the globally active pane is the
                     # focused surface inside the *selected* workspace.
                     focused=bool(s.get("focused")) and ws_selected,
+                    checkpoint_id=checkpoint_id,
                 )
             )
     return sessions
@@ -260,6 +268,24 @@ def resolve_target(target, sessions: Sequence[Session]) -> Optional[str]:
             return s.surface
     matches = [s for s in sessions if s.nickname.startswith(tl)]
     return matches[0].surface if len(matches) == 1 else None
+
+
+def label_from_title(title: str) -> str:
+    """cmux surface title → short human label for a session list.
+
+    cmux's auto-name hook rewrites a surface title to a pure LLM name once it
+    runs (e.g. "hardware-buddies-setup"); before that the title is
+    "<repo> · <prompt> · <sid-tail>". We want the most identifying middle part:
+    the pure name when there's one segment, else the second segment (the
+    prompt / interim name), dropping the leading repo and trailing sid tail.
+    """
+    t = (title or "").strip()
+    if not t:
+        return ""
+    parts = [p.strip() for p in t.split(" · ") if p.strip()]
+    if not parts:
+        return ""
+    return parts[1] if len(parts) >= 2 else parts[0]
 
 
 def _last_nonempty(text: str) -> str:
@@ -524,6 +550,45 @@ class CmuxClient:
         self.run(self._send_text_argv(surface, text))
         self.run(self._send_key_argv(surface, "Enter"))
         return surface
+
+    def focus_by_checkpoint(self, checkpoint_id: str) -> Optional[str]:
+        """Focus the cmux surface running the Claude session `checkpoint_id`.
+
+        Backs the cardputer physical session switcher: the firmware sends the
+        selected Claude session_id, and we pop its terminal pane (and its
+        owning workspace + window) to the front. `checkpoint_id` is cmux's
+        resume key for an agent pane — for a Claude Code pane it equals the
+        Claude `--session-id`, so the match is exact, not heuristic.
+
+        Returns the focused surface UUID on success, or None if no live surface
+        carries that session id (e.g. a manually-started claude with no cmux
+        agent-hook record) or the focus call fails — the caller treats None as
+        a no-op, never an error.
+        """
+        cid = (checkpoint_id or "").strip()
+        if not cid:
+            return None
+        match = next(
+            (s for s in self.list_sessions() if s.checkpoint_id == cid), None
+        )
+        if match is None:
+            return None
+        rc, _out, _err = self.run(self._focus_argv(match.surface))
+        return match.surface if rc == 0 else None
+
+    def session_labels(self) -> dict:
+        """{checkpoint_id: human label} for all live claude surfaces.
+
+        Backs the cardputer session-list labels: the firmware shows the cmux
+        auto-name (or interim prompt) instead of a raw UUID. Keyed by
+        checkpoint_id (= Claude session_id) so the bridge can attach a label to
+        each payload session by sid. Sessions with no checkpoint_id are skipped.
+        """
+        out = {}
+        for s in self.list_sessions():
+            if s.checkpoint_id:
+                out[s.checkpoint_id] = label_from_title(s.title)
+        return out
 
     def read_status(self, target) -> str:
         """Return the last non-empty line of the targeted ship's pane."""

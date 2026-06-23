@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +81,10 @@ class BuddyState:
     # internal — not sent
     # session_id -> {"running": bool, ...}  (bridges may add "last_seen")
     _sessions: dict = field(default_factory=dict)
+    # sid -> human label (cmux auto-name / title) for the cardputer session
+    # list. Populated by a bridge task (cc-bridge cmux_label_loop); empty dict
+    # when no label source is wired, so to_payload just omits labels.
+    session_labels: dict = field(default_factory=dict)
 
     def to_payload(self) -> dict:
         p = {
@@ -106,6 +111,39 @@ class BuddyState:
         if self.pending_play:
             p["play"] = self.pending_play
             self.pending_play = None  # one-shot — firmware plays once
+        # Per-session list for the cardputer physical session switcher (openspec
+        # change cardputer-session-switcher). Lean by design: `sid` (= Claude
+        # session_id, equals the cmux resume_binding.checkpoint_id so the bridge
+        # can focus the right pane) + `running` only — no prompt detail, the
+        # firmware jumps to the real terminal for that. Capped so a large fleet
+        # can't overflow the firmware line buffer (StickC _LineBuf<1024>,
+        # cardputer g_line[2048]); a UUID sid ≈ 45 B/entry → 16 ≈ 720 B worst
+        # case. Buddies that don't parse `sessions` (StickC, etc.) ignore the
+        # extra key (ArduinoJson skips unknown fields).
+        # Session list for the cardputer switcher. Prefer the cmux snapshot
+        # (session_labels = every switchable claude session + its auto-name)
+        # so the list matches what selectSession can actually focus and each
+        # row carries a human label. `running` comes from the hook-tracked
+        # _sessions when known. Fall back to _sessions alone when no cmux label
+        # source is wired (e.g. cursor-bridge / cmux not installed).
+        if self.session_labels:
+            sess = []
+            for _sid, _lbl in self.session_labels.items():
+                row = {"sid": _sid,
+                       "running": bool(self._sessions.get(_sid, {}).get("running"))}
+                if _lbl:
+                    row["label"] = _lbl
+                sess.append(row)
+                if len(sess) >= 16:
+                    break
+            p["sessions"] = sess
+        elif self._sessions:
+            sess = []
+            for _sid, _s in self._sessions.items():
+                sess.append({"sid": _sid, "running": bool(_s.get("running"))})
+                if len(sess) >= 16:
+                    break
+            p["sessions"] = sess
         return p
 
     def add_entry(self, line: str):
@@ -248,7 +286,9 @@ def _type_keycode(keycode: int, mods) -> None:
 
 def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
                        log: logging.Logger,
-                       state: "BuddyState | None" = None) -> tuple[Callable[[str], None], dict]:
+                       state: "BuddyState | None" = None,
+                       on_select_session: "Callable[[str], None] | None" = None
+                       ) -> tuple[Callable[[str], None], dict]:
     """Factory: returns (on_stick_line callback, PENDING dict).
 
     Keeping PENDING inside the closure means each daemon gets an isolated
@@ -344,6 +384,19 @@ def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
             elif isinstance(ch, str) and ch:
                 log.info("key ch=%r → unicode", ch)
                 _type_unicode(ch)
+            return
+
+        if cmd == "selectSession":
+            # cardputer physical session switcher: firmware sends the selected
+            # Claude session_id; daemon focuses the cmux pane running it. The
+            # cmux lookup shells out (hundreds of ms), so dispatch it off this
+            # BLE TX callback thread — blocking here would stall notify handling.
+            sid = obj.get("sid")
+            if on_select_session and isinstance(sid, str) and sid:
+                log.info("selectSession sid=%s", sid)
+                threading.Thread(
+                    target=on_select_session, args=(sid,), daemon=True
+                ).start()
             return
 
     return on_stick_line, pending
@@ -1234,6 +1287,7 @@ def run(
     log_fmt: Callable[[dict], str] | None = None,
     on_loop_start: Callable | None = None,
     route_stager=None,
+    on_select_session: "Callable[[str], None] | None" = None,
     serial_port: str | None = None,
     app: str = "",
 ) -> None:
@@ -1274,7 +1328,10 @@ def run(
     # all mutate and read the *same* instance.
     state = BuddyState()
     state.app = app
-    on_stick_line, pending = make_on_stick_line(ptt_keycode, ptt_mode, log, state=state)
+    on_stick_line, pending = make_on_stick_line(
+        ptt_keycode, ptt_mode, log, state=state,
+        on_select_session=on_select_session,
+    )
 
     # device_prefix is comma-separated for multi-peer (Plus2 + StackChan).
     # A single token (no comma) preserves the original single-peer

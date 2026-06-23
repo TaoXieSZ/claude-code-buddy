@@ -83,6 +83,7 @@ a keepalive every 10 seconds:
 | `limit_7d`     | Rolling 7-day rate-limit used %                                                   |
 | `session_ms`   | Session elapsed time in milliseconds                                              |
 | `prompt`       | Only present when a permission decision is needed. The `id` is what you echo back |
+| `sessions`     | Per-session list `[{"sid","running"}]` (omitted when empty, capped at 16). `sid` is the agent session id; a device shows a selectable list and echoes the chosen `sid` back as `{"cmd":"selectSession","sid":…}` (see below) |
 
 The `context_pct` / `model` / `limit_*` / `session_ms` fields are **HUD
 metrics**. The desktop apps don't send them; in this repo they're populated by
@@ -136,6 +137,22 @@ When `prompt` is present, your device can return a response. Send one of:
 
 The `id` must match `prompt.id` exactly. The desktop forwards this to the
 session manager: `"once"` approves the tool call, `"deny"` rejects it.
+
+## Session switch
+
+A device that renders the `sessions` list (see above) can let the user pick one
+and bring its terminal to the front. Echo the chosen session's `sid` back:
+
+```json
+{"cmd":"selectSession","sid":"41af42bb-fb94-42d9-88bd-f03446d71f25"}
+```
+
+The `sid` must match one of `sessions[].sid`. cc-bridge resolves it to the cmux
+pane running that Claude session (the `sid` equals cmux's
+`resume_binding.checkpoint_id`) and focuses it. If no live pane carries that
+session id, or cmux isn't running, the command is a logged no-op — never an
+error. The device shows only a selector; prompt details and approvals happen in
+the real terminal once focused.
 
 ## Mic PTT relay
 

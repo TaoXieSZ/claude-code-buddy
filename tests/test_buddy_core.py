@@ -64,6 +64,43 @@ def test_to_payload_pending_play_is_one_shot(fresh_state):
     fresh_state.pending_play = "permissionrequest"
     assert fresh_state.to_payload()["play"] == "permissionrequest"
     assert "play" not in fresh_state.to_payload()
+
+
+def test_to_payload_sessions_list_carries_sid_and_running(fresh_state):
+    # Per-session list for the cardputer session switcher: sid (= Claude
+    # session_id, matches cmux checkpoint_id) + running, insertion order kept.
+    fresh_state._sessions = {
+        "41af42bb-fb94-42d9-88bd-f03446d71f25": {"running": True},
+        "9c2e0000-0000-4000-8000-000000000002": {"running": False},
+    }
+    assert fresh_state.to_payload()["sessions"] == [
+        {"sid": "41af42bb-fb94-42d9-88bd-f03446d71f25", "running": True},
+        {"sid": "9c2e0000-0000-4000-8000-000000000002", "running": False},
+    ]
+
+
+def test_to_payload_sessions_omitted_when_empty(fresh_state):
+    # Back-compatible: no sessions → key absent, payload stays lean.
+    assert "sessions" not in fresh_state.to_payload()
+
+
+def test_to_payload_sessions_capped_to_protect_firmware_buffer(fresh_state):
+    fresh_state._sessions = {f"sid-{i}": {"running": False} for i in range(30)}
+    assert len(fresh_state.to_payload()["sessions"]) == 16
+
+
+def test_to_payload_session_label_present_when_known(fresh_state):
+    # cmux auto-name resolved → carried as `label` so firmware shows a name.
+    fresh_state._sessions = {"sid-a": {"running": True}}
+    fresh_state.session_labels = {"sid-a": "hardware-buddies-setup"}
+    assert fresh_state.to_payload()["sessions"][0] == {
+        "sid": "sid-a", "running": True, "label": "hardware-buddies-setup"}
+
+
+def test_to_payload_session_label_omitted_when_unknown(fresh_state):
+    # No label yet → key omitted, firmware falls back to sid prefix.
+    fresh_state._sessions = {"sid-a": {"running": False}}
+    assert "label" not in fresh_state.to_payload()["sessions"][0]
     assert fresh_state.pending_play is None
 
 
@@ -200,3 +237,38 @@ def test_ble_write_never_reconnects_inline(core):
         loop.run_until_complete(w.write({"running": 0}))   # returns, no scan
     finally:
         loop.close()
+
+
+# ─── on_stick_line: selectSession dispatch ─────────────────────────────
+
+def test_on_stick_line_select_session_dispatches_callback():
+    """{"cmd":"selectSession"} fires the injected callback (off-thread) with
+    the sid — backs the cardputer physical session switcher."""
+    import json
+    import logging
+    import threading
+    from buddy_core.core import make_on_stick_line
+
+    got = {}
+    done = threading.Event()
+
+    def _cb(sid):
+        got["sid"] = sid
+        done.set()
+
+    on_line, _pending = make_on_stick_line(
+        61, "tap", logging.getLogger("test"), on_select_session=_cb)
+    on_line(json.dumps({"cmd": "selectSession", "sid": "ABC"}))
+    assert done.wait(2.0), "callback was not dispatched"
+    assert got["sid"] == "ABC"
+
+
+def test_on_stick_line_select_session_no_callback_is_safe():
+    """No on_select_session wired (e.g. cursor-bridge) → selectSession is a
+    silent no-op, never raises."""
+    import json
+    import logging
+    from buddy_core.core import make_on_stick_line
+
+    on_line, _ = make_on_stick_line(61, "tap", logging.getLogger("test"))
+    on_line(json.dumps({"cmd": "selectSession", "sid": "ABC"}))  # must not raise

@@ -378,6 +378,32 @@ async def reaper_loop(state: BuddyState, dirty: asyncio.Event) -> None:
             dirty.set()
 
 
+async def cmux_label_loop(state: BuddyState, dirty: asyncio.Event) -> None:
+    """Refresh sid→label (cmux auto-name) every 15s for the cardputer session
+    list. cmux generates auto-names asynchronously, so we poll. The cmux CLI
+    call shells out → run it off-loop. Missing cmux / errors leave labels empty
+    (firmware falls back to a sid prefix), never crash the daemon.
+    """
+    log = logging.getLogger("cc-bridge")
+    try:
+        from control_plane.cmux_control import CmuxClient
+    except Exception:
+        log.info("cmux_label_loop: CmuxClient unavailable; session labels disabled")
+        return
+    cmux = CmuxClient()
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(15)
+        try:
+            labels = await loop.run_in_executor(None, cmux.session_labels)
+            if labels != state.session_labels:
+                state.session_labels = labels
+                dirty.set()
+                log.info("cmux labels refreshed: %d session(s)", len(labels))
+        except Exception:
+            log.debug("cmux label refresh failed", exc_info=True)
+
+
 if __name__ == "__main__":
     # Dashboard port: env var CC_BRIDGE_DASH_PORT overrides; 0 disables.
     # Default DEFAULT_PORT (8765) is fine on macOS where launchd doesn't
@@ -525,7 +551,24 @@ if __name__ == "__main__":
     # simply never fires (stage works, confirm's send no-ops with an error log).
     from control_plane.cmux_control import CmuxClient
     from control_plane.stager import RouteStager
-    _route_stager = RouteStager(route_fn=CmuxClient().route)
+    _cmux = CmuxClient()
+    _route_stager = RouteStager(route_fn=_cmux.route)
+
+    # cardputer physical session switcher (openspec change cardputer-session-
+    # switcher): firmware sends {"cmd":"selectSession","sid":<claude session_id>}
+    # → focus the cmux pane running that session. core.py runs this in a daemon
+    # thread (the cmux lookup shells out), so it must not touch the BLE loop.
+    # No matching surface / cmux not installed → logged no-op, never raises.
+    def _select_session(sid: str) -> None:
+        log = logging.getLogger("cc-bridge")
+        try:
+            surface = _cmux.focus_by_checkpoint(sid)
+            if surface:
+                log.info("selectSession %s → focused surface %s", sid, surface)
+            else:
+                log.info("selectSession %s → no matching cmux surface (ignored)", sid)
+        except Exception:
+            log.exception("selectSession %s failed", sid)
 
     run(
         name="cc-bridge",
@@ -538,8 +581,9 @@ if __name__ == "__main__":
         keepalive_s=10.0,
         rtc_sync_on_connect=False,  # Claude Desktop handles RTC for cc-bridge
         on_loop_start=_on_loop_start,
-        extra_tasks=[reaper_loop],
+        extra_tasks=[reaper_loop, cmux_label_loop],
         route_stager=_route_stager,
+        on_select_session=_select_session,
         serial_port=TAB5_SERIAL or None,
         app="claude",
     )
