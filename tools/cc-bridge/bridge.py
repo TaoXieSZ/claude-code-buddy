@@ -404,6 +404,34 @@ async def cmux_label_loop(state: BuddyState, dirty: asyncio.Event) -> None:
             log.debug("cmux label refresh failed", exc_info=True)
 
 
+async def cmux_question_loop(state: BuddyState, dirty: asyncio.Event) -> None:
+    """Poll cmux feed for a pending AskUserQuestion (cardputer question responder).
+    2s cadence (questions want quick response). MVP surfaces the first pending
+    question into state.pending_question; cleared when none pending. Off-loop
+    (cmux CLI shells out). Missing cmux / errors → no question, never crash.
+    """
+    log = logging.getLogger("cc-bridge")
+    try:
+        from control_plane.cmux_control import CmuxClient
+    except Exception:
+        log.info("cmux_question_loop: CmuxClient unavailable; question responder disabled")
+        return
+    cmux = CmuxClient()
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(2)
+        try:
+            qs = await loop.run_in_executor(None, cmux.pending_questions)
+            newq = qs[0] if qs else None   # MVP: first pending question
+            if (newq or {}).get("rid") != (state.pending_question or {}).get("rid"):
+                state.pending_question = newq
+                dirty.set()
+                log.info("pending question: %s",
+                         (newq["rid"][-24:] if newq else "none"))
+        except Exception:
+            log.debug("cmux question poll failed", exc_info=True)
+
+
 if __name__ == "__main__":
     # Dashboard port: env var CC_BRIDGE_DASH_PORT overrides; 0 disables.
     # Default DEFAULT_PORT (8765) is fine on macOS where launchd doesn't
@@ -570,6 +598,26 @@ if __name__ == "__main__":
         except Exception:
             log.exception("selectSession %s failed", sid)
 
+    # cardputer AskUserQuestion 应答器：固件回送 {rid, ids:[option id]}。把 id→label
+    # （从当前 pending question 查映射）再经 cmux feed.question.reply 回灌，cmux 唤醒
+    # 它阻塞的 hook 答复 Claude。无匹配 / cmux 缺失 → 日志忽略，不崩。
+    def _answer_question(rid: str, ids: list) -> None:
+        log = logging.getLogger("cc-bridge")
+        try:
+            labels = []
+            for q in _cmux.pending_questions():
+                if q.get("rid") == rid:
+                    idmap = {o["id"]: o["label"] for o in q.get("options", [])}
+                    labels = [idmap[i] for i in ids if i in idmap]
+                    break
+            if not labels:
+                log.info("answerQuestion %s → no matching pending question/ids (ignored)", rid[-24:])
+                return
+            ok = _cmux.answer_question(rid, labels)
+            log.info("answerQuestion %s → reply=%s selections=%s", rid[-24:], ok, labels)
+        except Exception:
+            log.exception("answerQuestion %s failed", rid[-24:])
+
     run(
         name="cc-bridge",
         socket_path=SOCKET_PATH,
@@ -581,9 +629,10 @@ if __name__ == "__main__":
         keepalive_s=10.0,
         rtc_sync_on_connect=False,  # Claude Desktop handles RTC for cc-bridge
         on_loop_start=_on_loop_start,
-        extra_tasks=[reaper_loop, cmux_label_loop],
+        extra_tasks=[reaper_loop, cmux_label_loop, cmux_question_loop],
         route_stager=_route_stager,
         on_select_session=_select_session,
+        on_answer_question=_answer_question,
         serial_port=TAB5_SERIAL or None,
         app="claude",
     )

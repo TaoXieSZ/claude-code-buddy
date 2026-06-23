@@ -288,6 +288,58 @@ def label_from_title(title: str) -> str:
     return parts[1] if len(parts) >= 2 else parts[0]
 
 
+# Feed question (AskUserQuestion) status strings that mean "no longer pending".
+# ⚠️ The exact PENDING status value is unverified on a live question (adv off);
+# we treat any non-terminal *string* status as pending and skip dict (telemetry)
+# status. Revisit once a live question can be observed.
+_Q_TERMINAL = {"expired", "completed", "cancelled", "canceled",
+               "answered", "replied", "done", "resolved"}
+
+
+def parse_pending_questions(feed_list_json: str) -> list:
+    """Pure: cmux `feed.list` JSON → pending AskUserQuestion list.
+
+    Each entry: {rid, header, prompt, multi, options:[{id,label}], sid}.
+    MVP takes the first question (questions[0]); multi-question AskUserQuestion
+    is not split here. Backs the cardputer question responder: the bridge polls
+    this, pushes it into payload.question, and answers via feed.question.reply.
+    """
+    try:
+        items = json.loads(feed_list_json).get("items", [])
+    except (ValueError, AttributeError, TypeError):
+        return []
+    out = []
+    for it in items:
+        if it.get("kind") != "question":
+            continue
+        status = it.get("status")
+        # dict status = telemetry (not actionable); terminal string = done.
+        if not isinstance(status, str) or status.lower() in _Q_TERMINAL:
+            continue
+        # feed.list (rpc) shape: rid + question fields are TOP-LEVEL snake_case
+        # (request_id / question_prompt / question_multi_select / question_options);
+        # header lives only in questions[0]. (Differs from workstream.jsonl audit.)
+        rid = it.get("request_id")
+        if not rid:
+            continue
+        qs = it.get("questions") or []
+        q0 = qs[0] if qs else {}
+        raw_opts = it.get("question_options") or q0.get("options") or []
+        opts = [{"id": o.get("id"), "label": o.get("label", "") or ""}
+                for o in raw_opts if o.get("id")]
+        if not opts:
+            continue
+        out.append({
+            "rid": rid,
+            "header": q0.get("header", "") or "",
+            "prompt": it.get("question_prompt") or q0.get("prompt", "") or "",
+            "multi": bool(it.get("question_multi_select", q0.get("multi_select"))),
+            "options": opts,
+            "sid": (it.get("workstreamId", "") or "").replace("claude-", ""),
+        })
+    return out
+
+
 def _last_nonempty(text: str) -> str:
     nonempty = [ln for ln in text.splitlines() if ln.strip()]
     return nonempty[-1].strip() if nonempty else ""
@@ -589,6 +641,25 @@ class CmuxClient:
             if s.checkpoint_id:
                 out[s.checkpoint_id] = label_from_title(s.title)
         return out
+
+    def pending_questions(self) -> list:
+        """Pending AskUserQuestion feed items (see parse_pending_questions)."""
+        rc, out, _err = self.run(self._rpc_argv("feed.list", {}))
+        return parse_pending_questions(out) if rc == 0 else []
+
+    def answer_question(self, rid: str, selections: list) -> bool:
+        """Answer an AskUserQuestion via cmux feed → wakes the blocked hook.
+
+        `selections` is a list of option labels (⚠️ label vs id unverified on a
+        live question; opencode-plugin treats selection as the answer string, so
+        label is the strong default). fire-and-forget: returns True if the CLI
+        call exited 0 (cmux does not validate rid liveness).
+        """
+        if not rid or not selections:
+            return False
+        rc, _o, _e = self.run(self._rpc_argv(
+            "feed.question.reply", {"request_id": rid, "selections": list(selections)}))
+        return rc == 0
 
     def read_status(self, target) -> str:
         """Return the last non-empty line of the targeted ship's pane."""

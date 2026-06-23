@@ -382,6 +382,54 @@ def test_session_labels_maps_checkpoint_to_label():
     assert c.session_labels() == {"CKPT-S1": "229a873b"}
 
 
+def test_parse_pending_questions_extracts_fields():
+    # feed.list (rpc) shape: top-level request_id / question_* ; header in questions[0].
+    from control_plane.cmux_control import parse_pending_questions
+    feed = json.dumps({"items": [
+        {"kind": "question", "status": "pending", "workstreamId": "claude-SID1",
+         "request_id": "RID1", "question_prompt": "pick one", "question_multi_select": False,
+         "question_options": [{"id": "opt0", "label": "A", "description": "d"},
+                              {"id": "opt1", "label": "B"}],
+         "questions": [{"header": "H", "prompt": "pick one", "multi_select": False,
+                        "options": [{"id": "opt0", "label": "A"}, {"id": "opt1", "label": "B"}]}]},
+        {"kind": "toolUse", "status": {"telemetry": {}}},
+    ]})
+    qs = parse_pending_questions(feed)
+    assert len(qs) == 1
+    q = qs[0]
+    assert q["rid"] == "RID1" and q["header"] == "H" and q["prompt"] == "pick one"
+    assert q["multi"] is False and q["sid"] == "SID1"
+    assert q["options"] == [{"id": "opt0", "label": "A"}, {"id": "opt1", "label": "B"}]
+
+
+def test_parse_pending_questions_skips_expired_and_telemetry():
+    from control_plane.cmux_control import parse_pending_questions
+    feed = json.dumps({"items": [
+        {"kind": "question", "status": "expired", "request_id": "X",
+         "question_options": [{"id": "o", "label": "l"}]},
+        {"kind": "question", "status": {"telemetry": {}}, "request_id": "Y",
+         "question_options": [{"id": "o", "label": "l"}]},
+    ]})
+    assert parse_pending_questions(feed) == []
+
+
+def test_answer_question_builds_reply_argv():
+    m = MockRunner()
+    c = CmuxClient(binary="CMUX", runner=m)
+    assert c.answer_question("RID1", ["A"]) is True
+    assert _method_call(m.calls, "feed.question.reply") == \
+        ["CMUX", "rpc", "feed.question.reply",
+         json.dumps({"request_id": "RID1", "selections": ["A"]})]
+
+
+def test_answer_question_empty_args_no_call():
+    m = MockRunner()
+    c = CmuxClient(binary="CMUX", runner=m)
+    assert c.answer_question("", ["A"]) is False
+    assert c.answer_question("RID", []) is False
+    assert all(c[2] != "feed.question.reply" for c in m.calls if len(c) > 2)
+
+
 def test_read_status_returns_last_nonempty_line():
     m = MockRunner(screen="line one\n\n  last meaningful line  \n\n")
     c = CmuxClient(binary="CMUX", runner=m)

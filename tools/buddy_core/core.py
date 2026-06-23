@@ -85,6 +85,9 @@ class BuddyState:
     # list. Populated by a bridge task (cc-bridge cmux_label_loop); empty dict
     # when no label source is wired, so to_payload just omits labels.
     session_labels: dict = field(default_factory=dict)
+    # 待应答的 AskUserQuestion（cmux feed，由 cc-bridge cmux_question_loop 填）。
+    # {rid, header, prompt, multi, options:[{id,label}]} 或 None。
+    pending_question: dict = None
 
     def to_payload(self) -> dict:
         p = {
@@ -144,6 +147,18 @@ class BuddyState:
                 if len(sess) >= 16:
                     break
             p["sessions"] = sess
+        # 待应答的 AskUserQuestion（cardputer question 应答器）。字段紧凑 + 截断防固件
+        # 行缓冲溢出；固件回送 option id，cc-bridge 再 id→label 调 feed.question.reply。
+        if self.pending_question:
+            q = self.pending_question
+            p["question"] = {
+                "rid": q.get("rid", ""),
+                "header": (q.get("header", "") or "")[:23],
+                "text": (q.get("prompt", "") or "")[:90],
+                "multi": bool(q.get("multi")),
+                "options": [{"id": o.get("id"), "label": (o.get("label", "") or "")[:38]}
+                            for o in (q.get("options") or [])[:6] if o.get("id")],
+            }
         return p
 
     def add_entry(self, line: str):
@@ -287,7 +302,8 @@ def _type_keycode(keycode: int, mods) -> None:
 def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
                        log: logging.Logger,
                        state: "BuddyState | None" = None,
-                       on_select_session: "Callable[[str], None] | None" = None
+                       on_select_session: "Callable[[str], None] | None" = None,
+                       on_answer_question: "Callable[[str, list], None] | None" = None
                        ) -> tuple[Callable[[str], None], dict]:
     """Factory: returns (on_stick_line callback, PENDING dict).
 
@@ -396,6 +412,19 @@ def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
                 log.info("selectSession sid=%s", sid)
                 threading.Thread(
                     target=on_select_session, args=(sid,), daemon=True
+                ).start()
+            return
+
+        if cmd == "answerQuestion":
+            # cardputer AskUserQuestion 应答器：固件回送选中 option id；回调
+            # (bridge) 把 id→label 经 cmux feed.question.reply 回灌。cmux 调用
+            # shells out → 丢 daemon 线程，不卡 BLE TX 回调。
+            rid = obj.get("rid")
+            ids = obj.get("ids")
+            if on_answer_question and isinstance(rid, str) and rid and isinstance(ids, list):
+                log.info("answerQuestion rid=%s ids=%s", rid[-24:], ids)
+                threading.Thread(
+                    target=on_answer_question, args=(rid, ids), daemon=True
                 ).start()
             return
 
@@ -1288,6 +1317,7 @@ def run(
     on_loop_start: Callable | None = None,
     route_stager=None,
     on_select_session: "Callable[[str], None] | None" = None,
+    on_answer_question: "Callable[[str, list], None] | None" = None,
     serial_port: str | None = None,
     app: str = "",
 ) -> None:
@@ -1331,6 +1361,7 @@ def run(
     on_stick_line, pending = make_on_stick_line(
         ptt_keycode, ptt_mode, log, state=state,
         on_select_session=on_select_session,
+        on_answer_question=on_answer_question,
     )
 
     # device_prefix is comma-separated for multi-peer (Plus2 + StackChan).
