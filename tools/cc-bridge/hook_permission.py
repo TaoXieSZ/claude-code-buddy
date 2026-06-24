@@ -78,12 +78,13 @@ def main() -> int:
     except Exception:
         return 0
 
-    # Bypass: when Claude Code is in --dangerously-skip-permissions or
-    # acceptEdits mode, the tool is going to auto-run regardless of what
-    # we say. Don't bother the stick (and don't burn the 8s wait); just
-    # exit clean and let Claude Code's normal flow proceed.
+    # Bypass: when Claude Code will auto-run the tool regardless of what we
+    # say, don't bother the stick (and don't burn the wait). This covers
+    # --dangerously-skip-permissions (bypassPermissions), acceptEdits, and
+    # 'auto' (full auto-accept) — verified live: auto mode sends mode='auto',
+    # which previously fell through and popped a pointless approval panel.
     mode = (ev.get("permission_mode") or "").lower()
-    if mode in ("bypasspermissions", "acceptedits"):
+    if mode in ("bypasspermissions", "acceptedits", "auto"):
         return 0
     if os.environ.get("CLAUDE_BYPASS_PERMISSIONS") in ("1", "true", "yes"):
         return 0
