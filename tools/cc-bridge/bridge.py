@@ -598,17 +598,23 @@ if __name__ == "__main__":
         except Exception:
             log.exception("selectSession %s failed", sid)
 
-    # cardputer AskUserQuestion 应答器：固件回送 {rid, ids:[option id]}。把 id→label
-    # （从当前 pending question 查映射）再经 cmux feed.question.reply 回灌，cmux 唤醒
-    # 它阻塞的 hook 答复 Claude。无匹配 / cmux 缺失 → 日志忽略，不崩。
-    def _answer_question(rid: str, ids: list) -> None:
+    # cardputer AskUserQuestion 应答器：固件回送 {rid, ids:[option id]}（选项选择）或
+    # {rid, text:"自由文本"}（chat about it / cancel，走 Other 通道）。选项 → id→label
+    # （查当前 pending question）；自由文本 → 直接当答案（cmux 原样收，零选项校验，见
+    # change cardputer-question-chat-cancel）。再经 cmux feed.question.reply 回灌，cmux
+    # 唤醒它阻塞的 hook 答复 Claude。无匹配 / cmux 缺失 → 日志忽略，不崩。
+    def _answer_question(rid: str, ids: "list | None", text: "str | None" = None) -> None:
         log = logging.getLogger("cc-bridge")
         try:
+            if text:                       # 自由文本：直接当答案，不查 id→label
+                ok = _cmux.answer_question(rid, [text])
+                log.info("answerQuestion %s → reply=%s (free text)", rid[-24:], ok)
+                return
             labels = []
             for q in _cmux.pending_questions():
                 if q.get("rid") == rid:
                     idmap = {o["id"]: o["label"] for o in q.get("options", [])}
-                    labels = [idmap[i] for i in ids if i in idmap]
+                    labels = [idmap[i] for i in (ids or []) if i in idmap]
                     break
             if not labels:
                 log.info("answerQuestion %s → no matching pending question/ids (ignored)", rid[-24:])

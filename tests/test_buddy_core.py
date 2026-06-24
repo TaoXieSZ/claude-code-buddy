@@ -298,16 +298,37 @@ def test_on_stick_line_answer_question_dispatches_callback():
     got = {}
     done = threading.Event()
 
-    def cb(rid, ids):
+    def cb(rid, ids, text):
         got["rid"] = rid
         got["ids"] = ids
+        got["text"] = text
         done.set()
 
     on_line, _ = make_on_stick_line(
         61, "tap", logging.getLogger("test"), on_answer_question=cb)
     on_line(json.dumps({"cmd": "answerQuestion", "rid": "R", "ids": ["opt0", "opt1"]}))
     assert done.wait(2.0), "answerQuestion callback not dispatched"
-    assert got["rid"] == "R" and got["ids"] == ["opt0", "opt1"]
+    assert got["rid"] == "R" and got["ids"] == ["opt0", "opt1"] and got["text"] is None
+
+
+def test_on_stick_line_answer_question_free_text_dispatches():
+    # chat about it / cancel：固件回送 {rid, text}，回调收到 text、ids 为 None。
+    import json
+    import logging
+    import threading
+    from buddy_core.core import make_on_stick_line
+    got = {}
+    done = threading.Event()
+
+    def cb(rid, ids, text):
+        got.update(rid=rid, ids=ids, text=text)
+        done.set()
+
+    on_line, _ = make_on_stick_line(
+        61, "tap", logging.getLogger("test"), on_answer_question=cb)
+    on_line(json.dumps({"cmd": "answerQuestion", "rid": "R", "text": "先跳过，你来定"}))
+    assert done.wait(2.0), "free-text answerQuestion callback not dispatched"
+    assert got["rid"] == "R" and got["ids"] is None and got["text"] == "先跳过，你来定"
 
 
 def test_on_stick_line_select_session_no_callback_is_safe():

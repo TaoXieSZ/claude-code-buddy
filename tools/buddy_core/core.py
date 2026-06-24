@@ -303,7 +303,7 @@ def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
                        log: logging.Logger,
                        state: "BuddyState | None" = None,
                        on_select_session: "Callable[[str], None] | None" = None,
-                       on_answer_question: "Callable[[str, list], None] | None" = None
+                       on_answer_question: "Callable[[str, list | None, str | None], None] | None" = None
                        ) -> tuple[Callable[[str], None], dict]:
     """Factory: returns (on_stick_line callback, PENDING dict).
 
@@ -416,15 +416,24 @@ def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
             return
 
         if cmd == "answerQuestion":
-            # cardputer AskUserQuestion 应答器：固件回送选中 option id；回调
-            # (bridge) 把 id→label 经 cmux feed.question.reply 回灌。cmux 调用
-            # shells out → 丢 daemon 线程，不卡 BLE TX 回调。
+            # cardputer AskUserQuestion 应答器：固件回送 {rid, ids:[option id]}（选项选择）
+            # 或 {rid, text:"自由文本"}（chat about it / cancel，走 Other 通道）。回调
+            # (bridge) 把 id→label 或 text 直接经 cmux feed.question.reply 回灌。cmux
+            # 调用 shells out → 丢 daemon 线程，不卡 BLE TX 回调。
             rid = obj.get("rid")
             ids = obj.get("ids")
-            if on_answer_question and isinstance(rid, str) and rid and isinstance(ids, list):
-                log.info("answerQuestion rid=%s ids=%s", rid[-24:], ids)
+            text = obj.get("text")
+            if isinstance(text, str):
+                text = text[:500]            # 健壮：截断超长自由文本
+            has_ids = isinstance(ids, list)
+            has_text = isinstance(text, str) and bool(text)
+            if on_answer_question and isinstance(rid, str) and rid and (has_ids or has_text):
+                log.info("answerQuestion rid=%s ids=%s text=%s",
+                         rid[-24:], ids if has_ids else None, has_text)
                 threading.Thread(
-                    target=on_answer_question, args=(rid, ids), daemon=True
+                    target=on_answer_question,
+                    args=(rid, ids if has_ids else None, text if has_text else None),
+                    daemon=True,
                 ).start()
             return
 
@@ -1317,7 +1326,7 @@ def run(
     on_loop_start: Callable | None = None,
     route_stager=None,
     on_select_session: "Callable[[str], None] | None" = None,
-    on_answer_question: "Callable[[str, list], None] | None" = None,
+    on_answer_question: "Callable[[str, list | None, str | None], None] | None" = None,
     serial_port: str | None = None,
     app: str = "",
 ) -> None:
