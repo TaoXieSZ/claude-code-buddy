@@ -427,6 +427,38 @@ def test_parse_pending_questions_skips_expired_and_telemetry():
     assert parse_pending_questions(feed) == []
 
 
+def _epoch(iso: str) -> float:
+    from datetime import datetime
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+
+
+def test_parse_pending_questions_drops_stale_zombie():
+    # cmux leaves a natively-answered question at status='pending' forever
+    # (updated_at == created_at). Age-gate drops it so the buddy firmware
+    # doesn't auto-approve every permission on a zombie pending question.
+    from control_plane.cmux_control import parse_pending_questions
+    feed = json.dumps({"items": [
+        {"kind": "question", "status": "pending", "request_id": "OLD",
+         "created_at": "2026-06-24T05:25:06Z",
+         "question_options": [{"id": "o", "label": "l"}]},
+    ]})
+    one_hour_later = _epoch("2026-06-24T05:25:06Z") + 3600
+    assert parse_pending_questions(feed, now=one_hour_later) == []
+
+
+def test_parse_pending_questions_keeps_fresh_and_reads_snake_case_sid():
+    from control_plane.cmux_control import parse_pending_questions
+    feed = json.dumps({"items": [
+        {"kind": "question", "status": "pending", "request_id": "FRESH",
+         "created_at": "2026-06-24T05:25:06Z", "workstream_id": "claude-SID9",
+         "question_options": [{"id": "o", "label": "l"}]},
+    ]})
+    five_s_later = _epoch("2026-06-24T05:25:06Z") + 5
+    qs = parse_pending_questions(feed, now=five_s_later)
+    assert len(qs) == 1 and qs[0]["rid"] == "FRESH"
+    assert qs[0]["sid"] == "SID9"  # snake_case workstream_id resolved
+
+
 def test_answer_question_builds_reply_argv():
     m = MockRunner()
     c = CmuxClient(binary="CMUX", runner=m)

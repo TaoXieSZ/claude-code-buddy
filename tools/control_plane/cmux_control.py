@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Optional, Sequence
 
 DEFAULT_CMUX = "/Applications/cmux.app/Contents/Resources/bin/cmux"
@@ -289,21 +291,48 @@ def label_from_title(title: str) -> str:
 
 
 # Feed question (AskUserQuestion) status strings that mean "no longer pending".
-# ⚠️ The exact PENDING status value is unverified on a live question (adv off);
-# we treat any non-terminal *string* status as pending and skip dict (telemetry)
-# status. Revisit once a live question can be observed.
+# Observed live (2026-06-24): a question's status string is literally 'pending'
+# while active. The catch: when answered via Claude Code's NATIVE UI (not cmux's
+# feed.question.reply), cmux NEVER transitions it — status stays 'pending' and
+# updated_at == created_at forever. So 'pending' alone cannot mean "still open";
+# we additionally age-gate below (see QUESTION_MAX_AGE_S).
 _Q_TERMINAL = {"expired", "completed", "cancelled", "canceled",
                "answered", "replied", "done", "resolved"}
 
+# A genuinely-pending AskUserQuestion BLOCKS the agent, so it is always recent.
+# Zombie 'pending' items (answered outside cmux, see above) are stale by minutes
+# to hours. Surfacing a zombie as pending makes the buddy firmware auto-approve
+# every permission (hasQuestion=true) — silently disabling manual approval. Drop
+# any question older than this so zombies can't poison the permission gate.
+QUESTION_MAX_AGE_S = 150.0
 
-def parse_pending_questions(feed_list_json: str) -> list:
+
+def _question_age_seconds(created_at: str, now: float) -> float:
+    """Seconds between ISO-8601 `created_at` (e.g. '2026-06-24T05:25:06Z') and
+    `now`. Fail-open: returns 0.0 (treat as fresh) on missing/unparseable input,
+    so a parse glitch never silently drops a real pending question."""
+    if not created_at:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        return now - dt.timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return 0.0
+
+
+def parse_pending_questions(feed_list_json: str, now: float | None = None) -> list:
     """Pure: cmux `feed.list` JSON → pending AskUserQuestion list.
 
     Each entry: {rid, header, prompt, multi, options:[{id,label}], sid}.
     MVP takes the first question (questions[0]); multi-question AskUserQuestion
     is not split here. Backs the cardputer question responder: the bridge polls
     this, pushes it into payload.question, and answers via feed.question.reply.
+
+    `now` (epoch seconds) is injectable for tests; defaults to wall clock. Used
+    to age-gate zombie 'pending' questions (see QUESTION_MAX_AGE_S).
     """
+    if now is None:
+        now = time.time()
     try:
         items = json.loads(feed_list_json).get("items", [])
     except (ValueError, AttributeError, TypeError):
@@ -315,6 +344,11 @@ def parse_pending_questions(feed_list_json: str) -> list:
         status = it.get("status")
         # dict status = telemetry (not actionable); terminal string = done.
         if not isinstance(status, str) or status.lower() in _Q_TERMINAL:
+            continue
+        # Age-gate zombies: a real pending question blocks the agent and is
+        # fresh; a 'pending' item older than the cap was answered outside cmux
+        # (status never transitioned) and must not poison the permission gate.
+        if _question_age_seconds(it.get("created_at") or "", now) > QUESTION_MAX_AGE_S:
             continue
         # feed.list (rpc) shape: rid + question fields are TOP-LEVEL snake_case
         # (request_id / question_prompt / question_multi_select / question_options);
@@ -335,7 +369,7 @@ def parse_pending_questions(feed_list_json: str) -> list:
             "prompt": it.get("question_prompt") or q0.get("prompt", "") or "",
             "multi": bool(it.get("question_multi_select", q0.get("multi_select"))),
             "options": opts,
-            "sid": (it.get("workstreamId", "") or "").replace("claude-", ""),
+            "sid": (it.get("workstream_id") or it.get("workstreamId") or "").replace("claude-", ""),
         })
     return out
 
