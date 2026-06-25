@@ -223,15 +223,24 @@ EXT_PUSH_INTERVAL_S = 2.0
 
 
 def _build_cursor_sessions(state: BuddyState) -> list:
-    """sessions[] snapshot from _sessions (no to_payload side effects).
-    sid = Cursor session UUID (== cmux title cursor-<UUID>)."""
-    out = []
-    labels = getattr(state, "session_labels", {})   # 老 buddy_core 可能没有此字段
+    """sessions[] snapshot — ONLY live cmux Cursor panes (state.session_labels
+    {cmux_sid: label}, populated by cmux_cursor_label_loop). st/ws joined from
+    hook-tracked _sessions by UUID first segment. Hook-only sessions (pane
+    closed / not in cmux) are NOT listed → device list == focusable cmux panes.
+    cmux unreachable → empty. openspec change cardputer-cursor-sessions.
+    """
+    labels = getattr(state, "session_labels", {})
+    by_seg = {}
     for sid, s in state._sessions.items():
-        row = {"sid": sid, "running": bool(s.get("running"))}
-        lbl = labels.get(sid)
-        if lbl:
-            row["label"] = lbl
+        by_seg.setdefault(sid.split("-")[0], (sid, s))
+
+    out = []
+    for cmux_sid, label in labels.items():
+        hook = by_seg.get(cmux_sid.split("-")[0])
+        full_sid, s = (hook[0], hook[1]) if hook else (cmux_sid, {})
+        row = {"sid": full_sid, "running": bool(s.get("running"))}
+        if label:
+            row["label"] = label
         if s.get("st"):
             row["st"] = s["st"]
         if s.get("ws"):
@@ -240,6 +249,67 @@ def _build_cursor_sessions(state: BuddyState) -> list:
         if len(out) >= 16:
             break
     return out
+
+
+# cmux binary — self-contained query (this fork has no control_plane module).
+CMUX_BIN = os.environ.get(
+    "CMUX_BIN", "/Applications/cmux.app/Contents/Resources/bin/cmux")
+
+
+def _cmux_cursor_panes() -> dict:
+    """{cursor_sid: label} for LIVE cmux Cursor panes, by shelling out to cmux.
+    A Cursor pane has no claude resume_binding; its UUID is in the title as
+    cursor-<UUID>. Returns {} on any failure. openspec cardputer-cursor-sessions.
+    """
+    import subprocess
+    import re as _re
+
+    def _rpc(method, params):
+        try:
+            out = subprocess.run(
+                [CMUX_BIN, "rpc", method, json.dumps(params)],
+                capture_output=True, text=True, timeout=5).stdout
+            return json.loads(out)
+        except Exception:
+            return {}
+
+    panes = {}
+    wl = _rpc("workspace.list", {})
+    for ws in (wl.get("workspaces") or wl.get("items") or []):
+        wid = ws.get("id") or ""
+        sl = _rpc("surface.list", {"workspace": wid})
+        for s in (sl.get("surfaces") or sl.get("items") or []):
+            rb = s.get("resume_binding") or {}
+            if rb.get("kind") == "claude":
+                continue
+            title = s.get("title") or ""
+            m = _re.search(r"cursor-([0-9a-fA-F-]+)", title)
+            if not m:
+                continue
+            head = title.split("· cursor-")[0].strip(" ·")
+            label = (head.split("·")[-1].strip() or head)[:24] if head else m.group(1)[:8]
+            panes[m.group(1)] = label
+    return panes
+
+
+async def cmux_cursor_label_loop(state: BuddyState, dirty: asyncio.Event):
+    """Poll cmux every 15s for LIVE Cursor panes → state.session_labels
+    {cursor_sid: label}, so the device's Cursor list == focusable cmux panes.
+    openspec cardputer-cursor-sessions.
+    """
+    import logging
+    log = logging.getLogger("cursor-bridge")
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(15)
+        try:
+            labels = await loop.run_in_executor(None, _cmux_cursor_panes)
+            if labels != getattr(state, "session_labels", None):
+                state.session_labels = labels
+                dirty.set()
+                log.info("cmux cursor labels refreshed: %d pane(s)", len(labels))
+        except Exception:
+            log.exception("cmux_cursor_label_loop tick failed")
 
 
 async def push_ext_sessions_loop(state: BuddyState, dirty: asyncio.Event):
@@ -326,7 +396,7 @@ if __name__ == "__main__":
         ptt_mode=PTT_MODE,
         keepalive_s=2.0,
         rtc_sync_on_connect=True,   # no Claude Desktop in the loop for cursor
-        extra_tasks=[reaper_loop, push_ext_sessions_loop],
+        extra_tasks=[reaper_loop, push_ext_sessions_loop, cmux_cursor_label_loop],
         log_fmt=_cursor_log_fmt,
         on_loop_start=_on_loop_start,
         serial_port=TAB5_SERIAL or None,
