@@ -430,12 +430,42 @@ async def cmux_question_loop(state: BuddyState, dirty: asyncio.Event) -> None:
         await asyncio.sleep(2)
         try:
             qs = await loop.run_in_executor(None, cmux.pending_questions)
-            newq = qs[0] if qs else None   # MVP: first pending question
-            if (newq or {}).get("rid") != (state.pending_question or {}).get("rid"):
+            item = qs[0] if qs else None   # first pending AskUserQuestion (whole item)
+            if item is None:
+                if state.pending_question is not None or state.mq is not None:
+                    state.pending_question = None
+                    state.mq = None
+                    dirty.set()
+                    log.info("pending question: none")
+                continue
+            real_rid = item["rid"]
+            subq = item.get("subq") or []
+            # New AskUserQuestion (different real rid) → (re)start the sequence.
+            if not state.mq or state.mq.get("rid") != real_rid:
+                state.mq = {"rid": real_rid, "cur": 0, "answers": [], "subq": subq}
+            mq = state.mq
+            cur = mq["cur"]
+            if cur >= len(mq["subq"]):
+                continue   # all sub-questions answered; awaiting reply/clear
+            # Surface the cur-th sub-question with a synthetic rid <real_rid>#<cur>
+            # so the device treats each as a fresh question (its rid dedup advances).
+            sub = mq["subq"][cur]
+            n = len(mq["subq"])
+            header = sub["header"]
+            if n > 1:
+                header = f"[{cur + 1}/{n}] {header}"
+            newq = {
+                "rid": f"{real_rid}#{cur}",
+                "header": header,
+                "prompt": sub["prompt"],
+                "multi": sub["multi"],
+                "options": sub["options"],
+                "sid": item.get("sid", ""),
+            }
+            if (state.pending_question or {}).get("rid") != newq["rid"]:
                 state.pending_question = newq
                 dirty.set()
-                log.info("pending question: %s",
-                         (newq["rid"][-24:] if newq else "none"))
+                log.info("pending question: %s (%d/%d)", real_rid[-24:], cur + 1, n)
         except Exception:
             log.debug("cmux question poll failed", exc_info=True)
 
@@ -614,9 +644,15 @@ if __name__ == "__main__":
     # （查当前 pending question）；自由文本 → 直接当答案（cmux 原样收，零选项校验，见
     # change cardputer-question-chat-cancel）。再经 cmux feed.question.reply 回灌，cmux
     # 唤醒它阻塞的 hook 答复 Claude。无匹配 / cmux 缺失 → 日志忽略，不崩。
-    def _answer_question(rid: str, ids: "list | None", text: "str | None" = None) -> None:
+    def _answer_question(rid: str, ids: "list | None", text: "str | None" = None,
+                         selections: "list | None" = None) -> None:
         log = logging.getLogger("cc-bridge")
         try:
+            if selections is not None:     # 多问题：每个子问题一个答案，一次性回送
+                ok = _cmux.answer_question(rid, selections)
+                log.info("answerQuestion %s → reply=%s (%d answers)",
+                         rid[-24:], ok, len(selections))
+                return
             if text:                       # 自由文本：直接当答案，不查 id→label
                 ok = _cmux.answer_question(rid, [text])
                 log.info("answerQuestion %s → reply=%s (free text)", rid[-24:], ok)

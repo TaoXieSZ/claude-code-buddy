@@ -94,6 +94,11 @@ class BuddyState:
     # 待应答的 AskUserQuestion（cmux feed，由 cc-bridge cmux_question_loop 填）。
     # {rid, header, prompt, multi, options:[{id,label}]} 或 None。
     pending_question: dict = None
+    # 多问题 AskUserQuestion 顺序作答状态机（openspec change cardputer-multi-question）。
+    # {rid: 真 request_id, cur: 当前子问题序号, answers: [已答], subq: [全部子问题]} 或 None。
+    # cmux_question_loop 用合成 rid <rid>#<cur> 逐个推子问题；_answer_question 累积答案、
+    # 全答完一次 feed.question.reply。设备只看到一串普通问题，固件不变。
+    mq: dict = None
     # 外部 agent 的会话快照（cursor-bridge 经 socket 推来的 ext_sessions），按
     # agent 名归类：{agent: {"sessions": [...], "ts": monotonic}}。cc-bridge 作为
     # 单一 BLE owner 把这些 append 到 payload sessions[]、标 agent，让一块 cardputer
@@ -474,9 +479,10 @@ def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
 
         if cmd == "answerQuestion":
             # cardputer AskUserQuestion 应答器：固件回送 {rid, ids:[option id]}（选项选择）
-            # 或 {rid, text:"自由文本"}（chat about it / cancel，走 Other 通道）。回调
-            # (bridge) 把 id→label 或 text 直接经 cmux feed.question.reply 回灌。cmux
-            # 调用 shells out → 丢 daemon 线程，不卡 BLE TX 回调。
+            # 或 {rid, text:"自由文本"}（chat about it / cancel，走 Other 通道）。
+            # 多问题（openspec change cardputer-multi-question）：rid 是合成 <real>#<idx>，
+            # 这里按 state.mq 累积每个子问题的答案；全答完才调 on_answer_question 一次性
+            # 把所有答案经 cmux feed.question.reply 回灌（shell-out → 丢线程不卡 BLE）。
             rid = obj.get("rid")
             ids = obj.get("ids")
             text = obj.get("text")
@@ -484,14 +490,56 @@ def make_on_stick_line(ptt_keycode: int, ptt_mode: str,
                 text = text[:500]            # 健壮：截断超长自由文本
             has_ids = isinstance(ids, list)
             has_text = isinstance(text, str) and bool(text)
-            if on_answer_question and isinstance(rid, str) and rid and (has_ids or has_text):
-                log.info("answerQuestion rid=%s ids=%s text=%s",
-                         rid[-24:], ids if has_ids else None, has_text)
-                threading.Thread(
-                    target=on_answer_question,
-                    args=(rid, ids if has_ids else None, text if has_text else None),
-                    daemon=True,
-                ).start()
+            if not (on_answer_question and isinstance(rid, str) and rid
+                    and (has_ids or has_text)):
+                return
+
+            mq = getattr(state, "mq", None) if state is not None else None
+            real_rid, sep, idx_s = rid.rpartition("#")
+            is_seq = bool(sep and idx_s.isdigit() and mq
+                          and mq.get("rid") == real_rid)
+            if is_seq:
+                idx = int(idx_s)
+                subq = mq.get("subq") or []
+                if idx != mq.get("cur") or idx >= len(subq):
+                    log.info("answerQuestion %s#%s stale (cur=%s) — ignored",
+                             real_rid[-16:], idx_s, mq.get("cur"))
+                    return
+                # this sub-question's answer: free text, or id→label (joined).
+                if has_text:
+                    ans = text
+                else:
+                    idmap = {o["id"]: o["label"] for o in subq[idx].get("options", [])}
+                    labels = [idmap[i] for i in (ids or []) if i in idmap]
+                    ans = ", ".join(labels)
+                mq["answers"].append(ans)
+                mq["cur"] = idx + 1
+                if mq["cur"] >= len(subq):
+                    # all sub-questions answered → one reply with every answer.
+                    answers = list(mq["answers"])
+                    log.info("answerQuestion %s complete (%d answers)",
+                             real_rid[-16:], len(answers))
+                    state.mq = None
+                    state.pending_question = None
+                    threading.Thread(
+                        target=on_answer_question,
+                        args=(real_rid, None, None, answers),
+                        daemon=True,
+                    ).start()
+                else:
+                    # advance: cmux_question_loop will surface the next sub-question.
+                    log.info("answerQuestion %s sub %d/%d answered",
+                             real_rid[-16:], idx + 1, len(subq))
+                return
+
+            # legacy / non-sequential single-question path
+            log.info("answerQuestion rid=%s ids=%s text=%s",
+                     rid[-24:], ids if has_ids else None, has_text)
+            threading.Thread(
+                target=on_answer_question,
+                args=(rid, ids if has_ids else None, text if has_text else None),
+                daemon=True,
+            ).start()
             return
 
     return on_stick_line, pending

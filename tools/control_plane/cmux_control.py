@@ -356,20 +356,38 @@ def parse_pending_questions(feed_list_json: str, now: float | None = None) -> li
         rid = it.get("request_id")
         if not rid:
             continue
-        qs = it.get("questions") or []
-        q0 = qs[0] if qs else {}
-        raw_opts = it.get("question_options") or q0.get("options") or []
-        opts = [{"id": o.get("id"), "label": o.get("label", "") or ""}
-                for o in raw_opts if o.get("id")]
-        if not opts:
+        # Build EVERY sub-question (q0/q1/…) for sequential multi-question answering
+        # (openspec change cardputer-multi-question). q0's options also live at the
+        # top-level snake_case keys; q1+ only inside questions[i]. When there's no
+        # questions[] array at all (snake_case-only item), treat top-level as q0.
+        qs = it.get("questions") or [{}]
+        subq = []
+        for j, q in enumerate(qs):
+            raw_opts = ((it.get("question_options") if j == 0 else None)
+                        or q.get("options") or [])
+            sopts = [{"id": o.get("id"), "label": o.get("label", "") or ""}
+                     for o in raw_opts if o.get("id")]
+            if not sopts:
+                continue
+            subq.append({
+                "header": q.get("header", "") or "",
+                "prompt": ((it.get("question_prompt") if j == 0 else None)
+                           or q.get("prompt", "") or ""),
+                "multi": bool(it.get("question_multi_select", q.get("multi_select"))
+                              if j == 0 else q.get("multi_select")),
+                "options": sopts,
+            })
+        if not subq:
             continue
         out.append({
+            # top-level = first sub-question (back-compat with single-question callers)
             "rid": rid,
-            "header": q0.get("header", "") or "",
-            "prompt": it.get("question_prompt") or q0.get("prompt", "") or "",
-            "multi": bool(it.get("question_multi_select", q0.get("multi_select"))),
-            "options": opts,
+            "header": subq[0]["header"],
+            "prompt": subq[0]["prompt"],
+            "multi": subq[0]["multi"],
+            "options": subq[0]["options"],
             "sid": (it.get("workstream_id") or it.get("workstreamId") or "").replace("claude-", ""),
+            "subq": subq,   # ALL sub-questions (len 1 for the common case)
         })
     return out
 
