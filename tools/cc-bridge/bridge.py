@@ -598,7 +598,10 @@ if __name__ == "__main__":
     def _select_session(sid: str) -> None:
         log = logging.getLogger("cc-bridge")
         try:
-            surface = _cmux.focus_by_checkpoint(sid)
+            # Claude pane (sid == checkpoint_id) first; fall back to a Cursor
+            # pane (no checkpoint, sid in title as cursor-<UUID>) so the device
+            # can focus Cursor sessions too (openspec cardputer-cursor-sessions).
+            surface = _cmux.focus_by_checkpoint(sid) or _cmux.focus_by_cursor_sid(sid)
             if surface:
                 log.info("selectSession %s → focused surface %s", sid, surface)
             else:

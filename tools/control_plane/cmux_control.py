@@ -668,6 +668,38 @@ class CmuxClient:
         self.activate_app()
         return match.surface
 
+    def focus_by_cursor_sid(self, sid: str) -> Optional[str]:
+        """Focus the cmux surface running the Cursor session `sid`.
+
+        A Cursor agent pane has NO resume_binding.checkpoint_id (cmux only
+        binds Claude panes), so focus_by_checkpoint can't find it. But the
+        cursor session UUID is embedded in the surface title as `cursor-<UUID>`
+        (openspec change cardputer-cursor-sessions, spike 2026-06-25). Match
+        that on a non-Claude surface (checkpoint_id empty) and focus it.
+
+        Returns the focused surface UUID, or None if no live Cursor surface
+        carries that sid / the focus call fails (caller treats None as no-op).
+        """
+        cid = (sid or "").strip()
+        if not cid:
+            return None
+        short = cid.split("-")[0]   # cmux title may show only `cursor-<8hex>`
+
+        def _is_match(s) -> bool:
+            if s.checkpoint_id:      # a Claude pane — skip
+                return False
+            title = s.title or ""
+            return ("cursor-" + cid) in title or ("cursor-" + short) in title
+
+        match = next((s for s in self.list_sessions() if _is_match(s)), None)
+        if match is None:
+            return None
+        rc, _out, _err = self.run(self._focus_argv(match.surface))
+        if rc != 0:
+            return None
+        self.activate_app()
+        return match.surface
+
     def _app_bundle(self) -> Optional[str]:
         """The .app bundle for self.binary (…/cmux.app/Contents/…/cmux → …/cmux.app)."""
         marker = "/Contents/"

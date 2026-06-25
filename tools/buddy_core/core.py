@@ -94,6 +94,13 @@ class BuddyState:
     # 待应答的 AskUserQuestion（cmux feed，由 cc-bridge cmux_question_loop 填）。
     # {rid, header, prompt, multi, options:[{id,label}]} 或 None。
     pending_question: dict = None
+    # 外部 agent 的会话快照（cursor-bridge 经 socket 推来的 ext_sessions），按
+    # agent 名归类：{agent: {"sessions": [...], "ts": monotonic}}。cc-bridge 作为
+    # 单一 BLE owner 把这些 append 到 payload sessions[]、标 agent，让一块 cardputer
+    # 同时看到 Claude + Cursor（openspec change cardputer-cursor-sessions）。本机
+    # 自己的会话仍走 _sessions，两者只在 to_payload 合并，计数器互不污染。
+    ext_sessions: dict = field(default_factory=dict)
+    EXT_STALE_SEC: float = 30.0   # 超过这个时长没更新的 ext 快照视为失联，不再发
 
     def set_session_state(self, sid: str, st: str) -> None:
         """Record a session's per-session state (idle/thinking/tool/waiting).
@@ -180,6 +187,23 @@ class BuddyState:
                 if len(sess) >= 16:
                     break
             p["sessions"] = sess
+        # 合并外部 agent（cursor-bridge 推来的 ext_sessions）。本机会话默认 agent=claude
+        # （不带字段，固件视缺省为 claude）；ext 每条标自己的 agent。超过 EXT_STALE_SEC
+        # 没更新的快照丢弃（cursor-bridge 挂了不留幽灵）。全表共用 16 上限。
+        if self.ext_sessions:
+            now = time.monotonic()
+            merged = p.get("sessions", [])
+            for _agent, _snap in self.ext_sessions.items():
+                if now - _snap.get("ts", 0) > self.EXT_STALE_SEC:
+                    continue
+                for _row in _snap.get("sessions", []):
+                    if len(merged) >= 16:
+                        break
+                    r = dict(_row)
+                    r["agent"] = _agent
+                    merged.append(r)
+            if merged:
+                p["sessions"] = merged
         # 待应答的 AskUserQuestion（cardputer question 应答器）。字段紧凑 + 截断防固件
         # 行缓冲溢出；固件回送 option id，cc-bridge 再 id→label 调 feed.question.reply。
         if self.pending_question:
@@ -1139,6 +1163,20 @@ async def handle_client(reader, writer, state: BuddyState, ble: BleWriter,
 
         if isinstance(head, dict) and head.get("action") == "wait_permission":
             await _handle_wait_permission(head, writer, state, dirty, pending, ble, log)
+            return
+
+        # External agent session snapshot (cursor-bridge → cc-bridge). Stash by
+        # agent name; to_payload merges it into sessions[] so one cardputer sees
+        # both Claude and Cursor (openspec change cardputer-cursor-sessions).
+        if isinstance(head, dict) and head.get("action") == "ext_sessions":
+            agent = str(head.get("agent") or "ext")[:16]
+            sessions = head.get("sessions")
+            if isinstance(sessions, list):
+                state.ext_sessions[agent] = {
+                    "sessions": sessions[:16],
+                    "ts": time.monotonic(),
+                }
+                dirty.set()   # push merged payload next heartbeat
             return
 
         if isinstance(head, dict) and head.get("action") == "screenshot":
