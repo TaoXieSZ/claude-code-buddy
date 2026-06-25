@@ -79,8 +79,14 @@ class BuddyState:
     stick_telemetry: dict | None = None
 
     # internal — not sent
-    # session_id -> {"running": bool, ...}  (bridges may add "last_seen")
+    # session_id -> {"running": bool, "st": str, "ws": int, ...}
+    #   st = per-session state (idle/thinking/tool/waiting); ws = FIFO seq when
+    #   waiting. Drives the cardputer multi-session rotation + pin (openspec
+    #   change cardputer-session-rotation). bridges may add "last_seen".
     _sessions: dict = field(default_factory=dict)
+    # monotonic counter assigning FIFO order to sessions entering "waiting"
+    # (cardputer pins the oldest-waiting session first).
+    _wait_seq: int = 0
     # sid -> human label (cmux auto-name / title) for the cardputer session
     # list. Populated by a bridge task (cc-bridge cmux_label_loop); empty dict
     # when no label source is wired, so to_payload just omits labels.
@@ -88,6 +94,24 @@ class BuddyState:
     # 待应答的 AskUserQuestion（cmux feed，由 cc-bridge cmux_question_loop 填）。
     # {rid, header, prompt, multi, options:[{id,label}]} 或 None。
     pending_question: dict = None
+
+    def set_session_state(self, sid: str, st: str) -> None:
+        """Record a session's per-session state (idle/thinking/tool/waiting).
+
+        Assigns a monotonic waiting seq (`ws`) when the session ENTERS
+        "waiting" so the cardputer can pin the oldest-waiting session first
+        (FIFO); clears `ws` when it leaves waiting. Creates the bucket if the
+        bridge never saw a SessionStart. See openspec change
+        cardputer-session-rotation.
+        """
+        s = self._sessions.setdefault(sid, {"running": False})
+        s["st"] = st
+        if st == "waiting":
+            if not s.get("ws"):          # assign once on entering waiting
+                self._wait_seq += 1
+                s["ws"] = self._wait_seq
+        else:
+            s["ws"] = 0                  # leaving waiting clears FIFO seq
 
     def to_payload(self) -> dict:
         p = {
@@ -132,10 +156,14 @@ class BuddyState:
         if self.session_labels:
             sess = []
             for _sid, _lbl in self.session_labels.items():
-                row = {"sid": _sid,
-                       "running": bool(self._sessions.get(_sid, {}).get("running"))}
+                _b = self._sessions.get(_sid, {})
+                row = {"sid": _sid, "running": bool(_b.get("running"))}
                 if _lbl:
                     row["label"] = _lbl
+                if _b.get("st"):      # per-session state (rotation)
+                    row["st"] = _b["st"]
+                if _b.get("ws"):      # FIFO waiting seq (pin)
+                    row["ws"] = _b["ws"]
                 sess.append(row)
                 if len(sess) >= 16:
                     break
@@ -143,7 +171,12 @@ class BuddyState:
         elif self._sessions:
             sess = []
             for _sid, _s in self._sessions.items():
-                sess.append({"sid": _sid, "running": bool(_s.get("running"))})
+                row = {"sid": _sid, "running": bool(_s.get("running"))}
+                if _s.get("st"):
+                    row["st"] = _s["st"]
+                if _s.get("ws"):
+                    row["ws"] = _s["ws"]
+                sess.append(row)
                 if len(sess) >= 16:
                     break
             p["sessions"] = sess
@@ -1198,6 +1231,7 @@ async def _handle_wait_permission(req, writer, state: BuddyState,
                                   ble, log: logging.Logger):
     rid = req.get("id") or f"req_{int(time.time() * 1000)}"
     tool = req.get("tool", "tool")
+    sid = req.get("session_id") or "anon"   # full session_id → per-session pin
     hint = (req.get("hint") or "")[:120]
     timeout = float(req.get("timeout", 6.0))
 
@@ -1225,6 +1259,7 @@ async def _handle_wait_permission(req, writer, state: BuddyState,
     state.waiting = max(state.waiting, 1)
     state.prompt = {"id": rid, "tool": tool, "hint": hint}
     state.msg = f"approve: {tool}"
+    state.set_session_state(sid, "waiting")   # 归属到发起会话 + 分配 FIFO seq
     dirty.set()
 
     fut = asyncio.get_running_loop().create_future()
@@ -1241,6 +1276,7 @@ async def _handle_wait_permission(req, writer, state: BuddyState,
         state.waiting = 0
         state.prompt = None
         state.msg = ""
+        state.set_session_state(sid, "idle")   # 离开等待，清 FIFO seq（后续 PreToolUse 会置 tool）
         dirty.set()
 
     try:

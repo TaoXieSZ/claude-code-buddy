@@ -108,6 +108,10 @@ def main() -> int:
         "tool": tool,
         "hint": str(hint),
         "timeout": TIMEOUT_S,
+        # Full session_id (not the [:8] rid prefix) so the daemon can attribute
+        # this permission to the right per-session bucket — drives the cardputer
+        # FIFO pin (openspec change cardputer-session-rotation).
+        "session_id": ev.get("session_id") or "anon",
     }
 
     try:

@@ -177,6 +177,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             state._sessions[sid] = {"running": False}
             state.total += 1
             changed = True
+        state.set_session_state(sid, "idle")
         state.add_entry("session start")
 
     elif name == "SessionEnd":
@@ -201,6 +202,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         if prompt:
             state.add_entry(f"you: {prompt}")
         state.msg = "thinking…"
+        state.set_session_state(sid, "thinking")
         changed = True
 
     elif name == "Stop":
@@ -212,6 +214,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             s["running"] = False
             state.running = max(0, state.running - 1)
             state.msg = "ready"
+            state.set_session_state(sid, "idle")
             changed = True
             _rover_dance(3000, respect_cooldown=False)  # end-of-turn celebration
 
@@ -220,6 +223,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         _clear_waiting(state)
         tool = ev.get("tool_name") or "tool"
         state.msg = f"running: {tool}"
+        state.set_session_state(sid, "tool")
         ti = ev.get("tool_input") or {}
         # Truncate command-y inputs if present.
         hint = ti.get("command") or ti.get("description") or ti.get("file_path") or ""
@@ -230,6 +234,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
     elif name == "PostToolUse":
         tool = ev.get("tool_name") or "tool"
         state.msg = f"done: {tool}"
+        state.set_session_state(sid, "tool")
         changed = True
         _rover_dance(1200)  # short wiggle; cooldown caps the per-turn frequency
 
@@ -251,6 +256,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
                     "hint": (ev.get("message") or ev.get("hint") or "")[:120],
                 }
                 state.msg = f"approve: {tool}"
+                state.set_session_state(sid, "waiting")
                 changed = True
         else:
             # Generic notification — show its message line.
@@ -268,6 +274,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
                     if s and s.get("running"):
                         s["running"] = False
                         state.running = max(0, state.running - 1)
+                    state.set_session_state(sid, "waiting")
                 changed = True
 
     elif name == "PreCompact":
@@ -275,6 +282,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         # leaving stale state on screen. openspec change 0005.
         state.msg = "compacting…"
         state.add_entry("compacting context…")
+        state.set_session_state(sid, "thinking")
         changed = True
 
     elif name == "PostCompact":
