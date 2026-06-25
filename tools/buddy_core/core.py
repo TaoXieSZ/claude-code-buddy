@@ -63,8 +63,25 @@ class BuddyState:
     stick_telemetry: dict | None = None
 
     # internal — not sent
-    # session_id -> {"running": bool, ...}  (bridges may add "last_seen")
+    # session_id -> {"running": bool, "st": str, "ws": int, ...}
     _sessions: dict = field(default_factory=dict)
+    # monotonic FIFO counter for sessions entering "waiting" (cardputer pins
+    # the oldest-waiting first). openspec change cardputer-cursor-sessions.
+    _wait_seq: int = 0
+
+    def set_session_state(self, sid: str, st: str) -> None:
+        """Record a session's per-session state (idle/thinking/tool/waiting).
+        Assigns a monotonic waiting seq (`ws`) on ENTERING waiting; clears on
+        leaving. Self-contained back-port for cursor-bridge's ext_sessions push.
+        """
+        s = self._sessions.setdefault(sid, {"running": False})
+        s["st"] = st
+        if st == "waiting":
+            if not s.get("ws"):
+                self._wait_seq += 1
+                s["ws"] = self._wait_seq
+        else:
+            s["ws"] = 0
 
     def to_payload(self) -> dict:
         p = {

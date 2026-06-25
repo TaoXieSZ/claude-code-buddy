@@ -42,6 +42,7 @@ Run as launchd daemon:
 import os
 import sys
 import time
+import json
 import asyncio
 import pathlib
 
@@ -97,6 +98,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             changed = True
         else:
             state._sessions[sid]["last_seen"] = now
+        state.set_session_state(sid, "idle")
         state.add_entry("session start")
 
     elif name == "SessionEnd":
@@ -122,6 +124,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         if prompt:
             state.add_entry(f"you: {prompt}")
         state.msg = "thinking…"
+        state.set_session_state(sid, "thinking")
         changed = True
 
     elif name == "Stop":
@@ -133,6 +136,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
                 s["running"] = False
                 state.running = max(0, state.running - 1)
                 state.msg = "ready"
+                state.set_session_state(sid, "idle")
                 changed = True
         # afterAgentResponse (Cursor) attaches output_tokens + text. Accumulate
         # tokens into state.tokens / state.tokens_today so the buddy's
@@ -161,6 +165,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         state.add_entry(line)
         if sid in state._sessions:
             state._sessions[sid]["last_seen"] = now
+        state.set_session_state(sid, "tool")
         changed = True
 
     elif name == "PostToolUse":
@@ -176,6 +181,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
             state.msg = f"done: {tool}"
         if sid in state._sessions:
             state._sessions[sid]["last_seen"] = now
+        state.set_session_state(sid, "tool")
         changed = True
 
     elif name in ("PermissionRequest", "Notification"):
@@ -190,6 +196,7 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
                 "hint": (ev.get("message") or ev.get("hint") or "")[:120],
             }
             state.msg = f"approve: {tool}"
+            state.set_session_state(sid, "waiting")
             changed = True
         else:
             # Generic notification — show its message line.
@@ -204,6 +211,59 @@ def apply_event(state: BuddyState, ev: dict) -> bool:
         changed = True
 
     return changed
+
+
+# ─── push Cursor sessions to cc-bridge (single-BLE-owner aggregation) ───
+# cursor-bridge has no BLE device of its own (scans Cursor-* in vain), so it
+# feeds its per-session snapshot to cc-bridge, which owns the cardputer's BLE
+# link and merges both agents' sessions[] into one payload. openspec change
+# cardputer-cursor-sessions. Disable by setting CC_BRIDGE_SOCKET="" .
+CC_BRIDGE_SOCKET = os.environ.get("CC_BRIDGE_SOCKET", "/tmp/cc-bridge.sock")
+EXT_PUSH_INTERVAL_S = 2.0
+
+
+def _build_cursor_sessions(state: BuddyState) -> list:
+    """sessions[] snapshot from _sessions (no to_payload side effects).
+    sid = Cursor session UUID (== cmux title cursor-<UUID>)."""
+    out = []
+    labels = getattr(state, "session_labels", {})   # 老 buddy_core 可能没有此字段
+    for sid, s in state._sessions.items():
+        row = {"sid": sid, "running": bool(s.get("running"))}
+        lbl = labels.get(sid)
+        if lbl:
+            row["label"] = lbl
+        if s.get("st"):
+            row["st"] = s["st"]
+        if s.get("ws"):
+            row["ws"] = s["ws"]
+        out.append(row)
+        if len(out) >= 16:
+            break
+    return out
+
+
+async def push_ext_sessions_loop(state: BuddyState, dirty: asyncio.Event):
+    """Periodically push Cursor sessions to cc-bridge's socket. Best-effort:
+    any failure (cc-bridge down, socket missing) is swallowed and retried."""
+    import logging
+    log = logging.getLogger("cursor-bridge")
+    if not CC_BRIDGE_SOCKET:
+        log.info("ext_sessions push disabled (CC_BRIDGE_SOCKET empty)")
+        return
+    while True:
+        await asyncio.sleep(EXT_PUSH_INTERVAL_S)
+        msg = json.dumps({
+            "action": "ext_sessions",
+            "agent": "cursor",
+            "sessions": _build_cursor_sessions(state),
+        }) + "\n"
+        try:
+            r, w = await asyncio.open_unix_connection(CC_BRIDGE_SOCKET)
+            w.write(msg.encode())
+            await w.drain()
+            w.close()
+        except Exception:
+            pass   # cc-bridge not up / no socket — try again next tick
 
 
 # ─── cursor-specific: stale-session reaper ─────────────────────────────
@@ -266,7 +326,7 @@ if __name__ == "__main__":
         ptt_mode=PTT_MODE,
         keepalive_s=2.0,
         rtc_sync_on_connect=True,   # no Claude Desktop in the loop for cursor
-        extra_tasks=[reaper_loop],
+        extra_tasks=[reaper_loop, push_ext_sessions_loop],
         log_fmt=_cursor_log_fmt,
         on_loop_start=_on_loop_start,
         serial_port=TAB5_SERIAL or None,
