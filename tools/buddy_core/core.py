@@ -192,23 +192,28 @@ class BuddyState:
                 if len(sess) >= 16:
                     break
             p["sessions"] = sess
-        # 合并外部 agent（cursor-bridge 推来的 ext_sessions）。本机会话默认 agent=claude
-        # （不带字段，固件视缺省为 claude）；ext 每条标自己的 agent。超过 EXT_STALE_SEC
-        # 没更新的快照丢弃（cursor-bridge 挂了不留幽灵）。全表共用 16 上限。
+        # 合并外部 agent（cursor/codex/opencode bridge 推来的 ext_sessions）。
+        # 本机会话默认 agent=claude（不带字段，固件视缺省为 claude）；ext 每条标自己的 agent。
+        # 超过 EXT_STALE_SEC 没更新的快照丢弃（bridge 挂了不留幽灵）。
+        # ── 槽位分配：ext sessions 先占，剩余给本地 Claude ──
+        # 避免本地 16 slots 全被 Claude 占满 → ext 全被挤出（常见于多 agent 场景）。
         if self.ext_sessions:
             now = time.monotonic()
-            merged = p.get("sessions", [])
+            # 先收集所有有效的 ext sessions
+            ext_rows = []
             for _agent, _snap in self.ext_sessions.items():
                 if now - _snap.get("ts", 0) > self.EXT_STALE_SEC:
                     continue
                 for _row in _snap.get("sessions", []):
-                    if len(merged) >= 16:
-                        break
                     r = dict(_row)
                     r["agent"] = _agent
-                    merged.append(r)
-            if merged:
-                p["sessions"] = merged
+                    ext_rows.append(r)
+            # ext 先占槽（上限 16），剩余给本地
+            merged = ext_rows[:16]
+            room = 16 - len(merged)
+            if room > 0 and p.get("sessions"):
+                merged = merged + p["sessions"][:room]
+            p["sessions"] = merged
         # 待应答的 AskUserQuestion（cardputer question 应答器）。字段紧凑 + 截断防固件
         # 行缓冲溢出；固件回送 option id，cc-bridge 再 id→label 调 feed.question.reply。
         if self.pending_question:
@@ -1320,6 +1325,14 @@ async def _handle_wait_permission(req, writer, state: BuddyState,
     sid = req.get("session_id") or "anon"   # full session_id → per-session pin
     hint = (req.get("hint") or "")[:120]
     timeout = float(req.get("timeout", 6.0))
+    # External-agent permission relayed THROUGH this daemon (e.g. cursor-bridge
+    # is push-only / no_ble, so Cursor's beforeShellExecution hook sends its
+    # wait_permission straight to cc-bridge, the single BLE owner). Such a
+    # request carries `agent`; its sid belongs to the OTHER agent's session
+    # space, so we must NOT set_session_state it — that would mint a phantom
+    # bucket in OUR _sessions and inflate the reaper's total. We only surface
+    # the prompt globally and tag it so the device can mark which agent asked.
+    ext_agent = (req.get("agent") or "").strip()[:16]
 
     # Short-circuit: only Plus2 sticks have an A/B permission button.
     # StackChan-class peers (prefix contains "SC") can't reply, so the
@@ -1344,8 +1357,11 @@ async def _handle_wait_permission(req, writer, state: BuddyState,
     # signalling dirty — the heartbeat loop will push it next tick.
     state.waiting = max(state.waiting, 1)
     state.prompt = {"id": rid, "tool": tool, "hint": hint}
+    if ext_agent:
+        state.prompt["agent"] = ext_agent   # device marks cu/cx vs own cc
     state.msg = f"approve: {tool}"
-    state.set_session_state(sid, "waiting")   # 归属到发起会话 + 分配 FIFO seq
+    if not ext_agent:
+        state.set_session_state(sid, "waiting")   # 归属到发起会话 + 分配 FIFO seq
     dirty.set()
 
     fut = asyncio.get_running_loop().create_future()
@@ -1362,7 +1378,8 @@ async def _handle_wait_permission(req, writer, state: BuddyState,
         state.waiting = 0
         state.prompt = None
         state.msg = ""
-        state.set_session_state(sid, "idle")   # 离开等待，清 FIFO seq（后续 PreToolUse 会置 tool）
+        if not ext_agent:
+            state.set_session_state(sid, "idle")   # 离开等待，清 FIFO seq（后续 PreToolUse 会置 tool）
         dirty.set()
 
     try:
@@ -1430,6 +1447,32 @@ async def reconnect_loop(ble, log: logging.Logger):
         await asyncio.sleep(wait)
 
 
+class _NullBleWriter:
+    """A BLE writer that owns no device and NEVER scans.
+
+    Used by push-only bridges (e.g. codex-bridge) that have no stick of their
+    own — they feed their per-session snapshot to another bridge's socket
+    (single-BLE-owner aggregation) and must NOT run a BleakScanner. A real
+    BleWriter here would periodically `BleakScanner.discover()` for a
+    non-existent peer, and on macOS that scan contends with the OWNING bridge's
+    BLE link badly enough to make it connect-then-drop (observed 2026-06-26: a
+    3rd scanner flapped cc-bridge's cardputer link; removing the scan fixed it).
+    Implements the minimal `ble` surface run()/heartbeat_loop touch — all no-ops.
+    """
+
+    def __init__(self, log=None):
+        self.connected_prefixes = []
+
+    async def write(self, payload):
+        return None
+
+    async def ensure_connected(self):
+        return False
+
+    async def close(self):
+        return None
+
+
 # ─── entrypoint ────────────────────────────────────────────────────────
 def run(
     *,
@@ -1451,6 +1494,7 @@ def run(
     on_answer_question: "Callable[[str, list | None, str | None], None] | None" = None,
     serial_port: str | None = None,
     app: str = "",
+    no_ble: bool = False,
 ) -> None:
     """Configure logging, wire everything up, and run the event loop.
 
@@ -1499,7 +1543,12 @@ def run(
     # A single token (no comma) preserves the original single-peer
     # codepath so existing single-stick deployments are unaffected.
     prefixes = [p.strip() for p in device_prefix.split(",") if p.strip()]
-    if len(prefixes) > 1:
+    if no_ble:
+        # Push-only bridge (codex-bridge): own no device, never scan. Avoids
+        # contending with the owning bridge's BLE link on the shared macOS radio.
+        log.info("BLE disabled (no_ble) — push-only mode, no scanning")
+        ble = _NullBleWriter(log)
+    elif len(prefixes) > 1:
         log.info("multi-peer BLE: %s", prefixes)
         ble = MultiBleWriter(
             prefixes=prefixes,
@@ -1575,8 +1624,10 @@ def run(
         tasks = [
             asyncio.create_task(server.serve_forever()),
             asyncio.create_task(heartbeat_loop(state, ble, dirty, keepalive_s, log, log_fmt)),
-            asyncio.create_task(reconnect_loop(ble, log)),
         ]
+        if not no_ble:
+            # No reconnect/scan loop in push-only mode (no device to scan for).
+            tasks.append(asyncio.create_task(reconnect_loop(ble, log)))
         if extra_tasks:
             for factory in extra_tasks:
                 tasks.append(asyncio.create_task(factory(state, dirty)))
