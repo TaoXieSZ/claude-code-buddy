@@ -50,6 +50,16 @@ BOARD_REGISTRY_DIR = _Path(
     or (_Path.home() / ".cache" / "control-plane" / "board-surfaces")
 )
 
+# cmux's session file — the ONLY place a pane's agent KIND (codex/cursor/…) is
+# exposed. surface.list (rpc) omits it, and a live agent overwrites its pane
+# title with the conversation topic, so title-matching is unreliable. Override
+# with CMUX_SESSION_JSON for tests / non-default installs.
+CMUX_SESSION_JSON = (
+    _os.environ.get("CMUX_SESSION_JSON")
+    or str(_Path.home()
+           / "Library/Application Support/cmux/session-com.cmuxterm.app.json")
+)
+
 
 def registered_board_surfaces() -> set[str]:
     """Return the set of surface UUIDs registered as live board panes."""
@@ -718,6 +728,155 @@ class CmuxClient:
         self.activate_app()
         return match.surface
 
+    def focus_by_opencode_sid(self, sid: str) -> Optional[str]:
+        """Focus the cmux surface running the OpenCode session with agent.sessionId == sid.
+
+        Unlike codex (cwd-based join) or cursor (title-based join), opencode panes
+        carry agent.sessionId in the cmux session file — same as Claude's
+        checkpoint_id. So we match by sessionId directly. Falls back to title-based
+        surface.list scan if the session file is unreadable.
+        """
+        sid = (sid or "").strip()
+        if not sid:
+            return None
+        # Primary: cmux session file (terminal.agent.kind == "opencode")
+        try:
+            with open(CMUX_SESSION_JSON, encoding="utf-8") as f:
+                doc = json.load(f)
+            stack = [doc]
+            while stack:
+                o = stack.pop()
+                if isinstance(o, dict):
+                    ag = (o.get("terminal") or {}).get("agent") or {}
+                    if ag.get("kind") == "opencode" and ag.get("sessionId") == sid:
+                        surface = o.get("id")
+                        if surface:
+                            return surface
+                    stack.extend(o.values())
+                elif isinstance(o, list):
+                    stack.extend(o)
+        except Exception:
+            pass
+        # Fallback: title-based surface.list scan (pane titles may contain the sid prefix).
+        try:
+            wrc, wout, _ = self.run(self._rpc_argv("window.list", {}))
+            wins = ([w.get("id", "") for w in json.loads(wout).get("windows", [])
+                     if w.get("id")] if wrc == 0 else []) or [""]
+            for win in wins:
+                params = {"window_id": win} if win else {}
+                wsrc, wsout, _ = self.run(self._rpc_argv("workspace.list", params))
+                if wsrc != 0:
+                    continue
+                for ws in json.loads(wsout).get("workspaces", []):
+                    ssrc, sout, _ = self.run(
+                        self._rpc_argv("surface.list", {"workspace": ws.get("id", "")}))
+                    if ssrc != 0:
+                        continue
+                    for s in json.loads(sout).get("surfaces", []):
+                        title = s.get("title") or ""
+                        if sid[:12] in title:  # ses_XXXXXXXXXXXX prefix match
+                            return s.get("id") or None
+        except Exception:
+            return None
+        return None
+
+    def _opencode_surface_for_sid(self, sid: str) -> Optional[str]:
+        """surface_id for opencode pane with agent.sessionId == sid (no focus side-effect)."""
+        try:
+            with open(CMUX_SESSION_JSON, encoding="utf-8") as f:
+                doc = json.load(f)
+            stack = [doc]
+            while stack:
+                o = stack.pop()
+                if isinstance(o, dict):
+                    ag = (o.get("terminal") or {}).get("agent") or {}
+                    if ag.get("kind") == "opencode" and ag.get("sessionId") == sid:
+                        if o.get("id"):
+                            return o["id"]
+                    stack.extend(o.values())
+                elif isinstance(o, list):
+                    stack.extend(o)
+        except Exception:
+            pass
+        return None
+
+    def focus_by_codex_cwd(self, cwd: str) -> Optional[str]:
+        """Focus the cmux surface running the Codex session in directory `cwd`.
+
+        cmux exposes a pane's agent KIND only in its session file — surface.list
+        omits it and a live Codex pane's title is its conversation topic, not
+        "codex". So we read that file, find the Codex pane whose
+        agent.workingDirectory matches `cwd` (the device-sent sid: the cwd or its
+        last 39 chars per the firmware sid[40] cap → exact OR suffix match), and
+        focus its surface id. Falls back to a title-based surface.list scan when
+        the session file is unreadable. openspec change cardputer-codex-sessions.
+
+        Known limitation: two Codex panes in one dir collide on cwd; we focus the
+        first match. Returns the surface UUID, or None on no match / focus failure.
+        """
+        want = (cwd or "").strip()
+        if not want:
+            return None
+        surface = self._codex_surface_for_cwd(want)
+        if not surface:
+            return None
+        rc, _out, _err = self.run(self._focus_argv(surface))
+        if rc != 0:
+            return None
+        self.activate_app()
+        return surface
+
+    def _codex_surface_for_cwd(self, want: str) -> Optional[str]:
+        """surface_id of the Codex pane whose agent.workingDirectory == want (or
+        endswith it). cmux session file primary; title-based surface.list scan
+        fallback. Consistent with codex-bridge `_cmux_codex_panes` (both key on
+        the agent's workingDirectory). openspec cardputer-codex-sessions."""
+        # Primary: cmux session file (terminal.agent.kind == "codex").
+        try:
+            with open(CMUX_SESSION_JSON, encoding="utf-8") as f:
+                doc = json.load(f)
+            stack = [doc]
+            while stack:
+                o = stack.pop()
+                if isinstance(o, dict):
+                    ag = (o.get("terminal") or {}).get("agent") or {}
+                    if ag.get("kind") == "codex":
+                        wd = ag.get("workingDirectory") or ""
+                        if wd and (wd == want or wd.endswith(want)) and o.get("id"):
+                            return o["id"]
+                    stack.extend(o.values())
+                elif isinstance(o, list):
+                    stack.extend(o)
+        except Exception:
+            pass
+        # Fallback: title-based surface.list scan (pre-retitle panes).
+        try:
+            wrc, wout, _ = self.run(self._rpc_argv("window.list", {}))
+            wins = ([w.get("id", "") for w in json.loads(wout).get("windows", [])
+                     if w.get("id")] if wrc == 0 else []) or [""]
+            for win in wins:
+                params = {"window_id": win} if win else {}
+                wsrc, wsout, _ = self.run(self._rpc_argv("workspace.list", params))
+                if wsrc != 0:
+                    continue
+                for ws in json.loads(wsout).get("workspaces", []):
+                    src, sout, _ = self.run(
+                        self._rpc_argv("surface.list", {"workspace_id": ws.get("id", "")}))
+                    if src != 0:
+                        continue
+                    for s in json.loads(sout).get("surfaces", []):
+                        rb = s.get("resume_binding") or {}
+                        if rb.get("kind") == "claude" or "cursor-" in (s.get("title") or ""):
+                            continue
+                        if "codex" not in (s.get("title") or "").lower():
+                            continue
+                        rwd = s.get("requested_working_directory") or ""
+                        if rwd == want or rwd.endswith(want):
+                            return s.get("id") or None
+        except Exception:
+            return None
+        return None
+
     def _app_bundle(self) -> Optional[str]:
         """The .app bundle for self.binary (…/cmux.app/Contents/…/cmux → …/cmux.app)."""
         marker = "/Contents/"
@@ -747,6 +906,25 @@ class CmuxClient:
         for s in self.list_sessions():
             if s.checkpoint_id:
                 out[s.checkpoint_id] = label_from_title(s.title)
+        return out
+
+    def cursor_session_labels(self) -> dict:
+        """{cursor_sid: human label} for live Cursor surfaces.
+
+        A Cursor pane has no resume_binding.checkpoint_id (cmux only binds
+        Claude panes); its session UUID is embedded in the title as
+        `cursor-<UUID>`. Keyed by that UUID (as it appears in the title — may be
+        a prefix) so cursor-bridge can list only LIVE, focusable Cursor panes
+        (not stale hook-history sessions) and attach a label. openspec change
+        cardputer-cursor-sessions.
+        """
+        out = {}
+        for s in self.list_sessions():
+            if s.checkpoint_id:           # a Claude pane — skip
+                continue
+            m = _re.search(r"cursor-([0-9a-fA-F-]+)", s.title or "")
+            if m:
+                out[m.group(1)] = label_from_title(s.title)
         return out
 
     def pending_questions(self) -> list:
